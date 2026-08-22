@@ -7,6 +7,7 @@ import {
   ClientSettingsPatch,
   DEFAULT_SERVER_SETTINGS,
   defaultEnabledForDriver,
+  PiSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -16,6 +17,7 @@ const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+const decodePiSettings = Schema.decodeSync(PiSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
 describe("ClientSettings word wrap", () => {
@@ -179,6 +181,55 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
+describe("Pi provider settings", () => {
+  it("decodes disabled defaults without adding static models or credentials", () => {
+    expect(decodePiSettings({})).toEqual({
+      enabled: false,
+      binaryPath: "pi",
+      agentDir: "",
+      launchArgs: "",
+    });
+    expect(decodeServerSettings({}).providers.piAgent).toEqual({
+      enabled: false,
+      binaryPath: "pi",
+      agentDir: "",
+      launchArgs: "",
+    });
+  });
+
+  it("accepts trimmed Pi patches and explicit instance configuration", () => {
+    const patch = decodeServerSettingsPatch({
+      providers: {
+        piAgent: {
+          binaryPath: "  /opt/pi  ",
+          agentDir: "  /profiles/work  ",
+          launchArgs: "  --approve  ",
+        },
+      },
+    });
+    expect(patch.providers?.piAgent).toEqual({
+      binaryPath: "/opt/pi",
+      agentDir: "/profiles/work",
+      launchArgs: "--approve",
+    });
+
+    const decoded = decodeServerSettings({
+      providerInstances: {
+        pi_work: {
+          driver: "piAgent",
+          environment: [{ name: "ANTHROPIC_API_KEY", value: "test-key" }],
+          config: { binaryPath: "/opt/pi", agentDir: "/profiles/work" },
+        },
+      },
+    });
+    expect(decoded.providerInstances[ProviderInstanceId.make("pi_work")]).toEqual({
+      driver: ProviderDriverKind.make("piAgent"),
+      environment: [{ name: "ANTHROPIC_API_KEY", value: "test-key", sensitive: false }],
+      config: { binaryPath: "/opt/pi", agentDir: "/profiles/work" },
+    });
+  });
+});
+
 describe("provider enabled defaults", () => {
   it("enables only the stable bindings by default", () => {
     const decoded = decodeServerSettings({});
@@ -187,12 +238,14 @@ describe("provider enabled defaults", () => {
     expect(decoded.providers.cursor.enabled).toBe(true);
     expect(decoded.providers.grok.enabled).toBe(false);
     expect(decoded.providers.opencode.enabled).toBe(false);
+    expect(decoded.providers.piAgent.enabled).toBe(false);
   });
 
   it("derives per-driver defaults from the settings schemas", () => {
     expect(defaultEnabledForDriver(ProviderDriverKind.make("codex"))).toBe(true);
     expect(defaultEnabledForDriver(ProviderDriverKind.make("cursor"))).toBe(true);
     expect(defaultEnabledForDriver(ProviderDriverKind.make("grok"))).toBe(false);
+    expect(defaultEnabledForDriver(ProviderDriverKind.make("piAgent"))).toBe(false);
     // Unknown fork drivers stay enabled; their own build decides otherwise.
     expect(defaultEnabledForDriver(ProviderDriverKind.make("ollama"))).toBe(true);
   });

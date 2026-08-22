@@ -23,6 +23,25 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.providerInstanceId).toBe("ollama_local");
   });
 
+  it("decodes Pi RPC raw records", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "session.started",
+      eventId: "event-pi-session",
+      provider: "piAgent",
+      providerInstanceId: "piAgent",
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-pi",
+      payload: { message: "started" },
+      raw: {
+        source: "pi.rpc",
+        messageType: "agent_start",
+        payload: { type: "agent_start" },
+      },
+    });
+
+    expect(parsed.raw?.source).toBe("pi.rpc");
+  });
+
   it("decodes turn.plan.updated for plan rendering", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.plan.updated",
