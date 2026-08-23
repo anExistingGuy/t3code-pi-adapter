@@ -4,7 +4,6 @@ import {
   type ServerProvider,
   type ProviderInstanceEnvironment,
 } from "@t3tools/contracts";
-import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -22,63 +21,11 @@ import {
   type ProviderInstance,
 } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
+import { validatePiLaunchArgs } from "../pi/PiLaunch.ts";
+
+export { validatePiLaunchArgs } from "../pi/PiLaunch.ts";
 
 const decodePiSettings = Schema.decodeSync(PiSettings);
-
-const RESERVED_FLAGS = [
-  "--mode",
-  "--no-session",
-  "--session",
-  "--session-dir",
-  "--provider",
-  "--model",
-  "--thinking",
-  "--print",
-  "-p",
-] as const;
-
-const BOOLEAN_FLAGS = new Set([
-  "--verbose",
-  "--approve",
-  "-a",
-  "--no-approve",
-  "-na",
-  "--no-extensions",
-  "--no-skills",
-  "--no-prompt-templates",
-  "--no-themes",
-  "--no-context-files",
-  "-nc",
-  "--no-builtin-tools",
-  "-nbt",
-  "--no-tools",
-  "-nt",
-]);
-
-export function validatePiLaunchArgs(launchArgs: string): string | undefined {
-  const argv = tokenizeCliArgs(launchArgs);
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === undefined) continue;
-
-    const reserved = RESERVED_FLAGS.find(
-      (flag) => arg === flag || (flag.startsWith("--") && arg.startsWith(`${flag}=`)),
-    );
-    if (reserved !== undefined) {
-      return `Launch arguments cannot set adapter-owned argument '${reserved}'.`;
-    }
-    if (arg === "--") {
-      return "Launch arguments cannot include an initial prompt.";
-    }
-    if (!arg.startsWith("-")) {
-      return "Launch arguments cannot include an initial prompt.";
-    }
-    if (!BOOLEAN_FLAGS.has(arg) && !arg.includes("=")) {
-      index += 1;
-    }
-  }
-  return undefined;
-}
 
 export function resolvePiInstanceEnvironment(
   environment: ProviderInstanceEnvironment,
