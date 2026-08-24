@@ -12,7 +12,11 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
-import { makePiRpcRuntime, type PiRpcProtocolLogEvent } from "./PiRpcRuntime.ts";
+import {
+  makePiRpcRuntime,
+  type PiRpcProtocolLogEvent,
+  type PiRpcRuntimeOptions,
+} from "./PiRpcRuntime.ts";
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockPath = NodePath.join(__dirname, "../../../scripts/pi-rpc-mock-agent.mjs");
@@ -23,6 +27,7 @@ function makeRuntime(input?: {
   readonly maxRecordBytes?: number;
   readonly logs?: PiRpcProtocolLogEvent[];
   readonly gracefulCloseTimeout?: Duration.Input;
+  readonly extensionUiRequestHandler?: PiRpcRuntimeOptions["extensionUiRequestHandler"];
 }) {
   return makePiRpcRuntime({
     launch: {
@@ -38,6 +43,9 @@ function makeRuntime(input?: {
     ...(input?.gracefulCloseTimeout === undefined
       ? {}
       : { gracefulCloseTimeout: input.gracefulCloseTimeout }),
+    ...(input?.extensionUiRequestHandler
+      ? { extensionUiRequestHandler: input.extensionUiRequestHandler }
+      : {}),
     ...(input?.logs
       ? {
           protocolLogger: (event: PiRpcProtocolLogEvent) =>
@@ -190,6 +198,33 @@ nodeIt("PiRpcRuntime", (it) => {
       expect(count.output).toBe("1");
       yield* runtime.close;
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "lets an acquisition-time handler answer extension dialogs before subscribers run",
+    () =>
+      Effect.gen(function* () {
+        const runtime = yield* makeRuntime({
+          extensionUiRequestHandler: (request) =>
+            Effect.succeed({
+              type: "extension_ui_response",
+              id: request.id,
+              cancelled: true,
+            }),
+        });
+        yield* runtime.prompt({ message: "dialog" });
+        const count = yield* runtime.bash("extension-count");
+        expect(count.output).toBe("1");
+
+        yield* runtime.sendExtensionUiResponse({
+          type: "extension_ui_response",
+          id: "dialog-1",
+          cancelled: true,
+        });
+        const afterDuplicate = yield* runtime.bash("extension-count");
+        expect(afterDuplicate.output).toBe("1");
+        yield* runtime.close;
+      }).pipe(Effect.scoped),
   );
 
   it.effect("cancels outstanding extension dialogs before graceful close", () =>

@@ -4,17 +4,23 @@ import {
   type ServerProvider,
   type ProviderInstanceEnvironment,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { ChildProcessSpawner } from "effect/unstable/process";
+
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 
 import { makePiTextGeneration } from "../../textGeneration/PiTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makePiAdapter } from "../Layers/PiAdapter.ts";
 import {
   buildInitialPiProviderSnapshot,
-  makeStaticPiProvider,
+  checkPiProviderStatus,
   PI_MAINTENANCE_CAPABILITIES,
 } from "../Layers/PiProvider.ts";
+import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -22,6 +28,11 @@ import {
 } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { validatePiLaunchArgs } from "../pi/PiLaunch.ts";
+import {
+  haveProviderSnapshotSettingsChanged,
+  makeProviderSnapshotSettingsSource,
+  type ProviderSnapshotSettings,
+} from "../providerUpdateSettings.ts";
 
 export { validatePiLaunchArgs } from "../pi/PiLaunch.ts";
 
@@ -36,7 +47,11 @@ export function resolvePiInstanceEnvironment(
   return agentDir.trim() ? { ...merged, PI_CODING_AGENT_DIR: agentDir.trim() } : merged;
 }
 
-export type PiDriverEnv = never;
+export type PiDriverEnv =
+  | BackgroundPolicy.BackgroundPolicy
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Crypto.Crypto
+  | ServerSettingsService;
 
 const stampInstanceIdentity = (input: {
   readonly draft: Omit<ServerProvider, "instanceId" | "driver">;
@@ -63,6 +78,9 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
   defaultConfig: (): PiSettings => decodePiSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const serverSettings = yield* ServerSettingsService;
       const launchArgsIssue = validatePiLaunchArgs(config.launchArgs);
       if (launchArgsIssue !== undefined) {
         return yield* new ProviderDriverError({
@@ -73,22 +91,47 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
       }
 
       const effectiveConfig = { ...config, enabled } satisfies PiSettings;
-      // Resolve this at instance creation so the precedence is fixed before
-      // phase two starts spawning per-session RPC processes.
+      // Resolve this at instance creation so probes and later session processes
+      // use the same environment precedence.
       const processEnv = resolvePiInstanceEnvironment(environment, effectiveConfig.agentDir);
 
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: PI_DRIVER_KIND,
         instanceId,
       });
-      const draft = yield* buildInitialPiProviderSnapshot(effectiveConfig);
-      const providerSnapshot = stampInstanceIdentity({
-        draft,
-        instanceId,
-        displayName,
-        accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
-      });
+      const stampIdentity = (draft: Omit<ServerProvider, "instanceId" | "driver">) =>
+        stampInstanceIdentity({
+          draft,
+          instanceId,
+          displayName,
+          accentColor,
+          continuationGroupKey: continuationIdentity.continuationKey,
+        });
+      const checkProvider = checkPiProviderStatus(effectiveConfig, process.cwd(), processEnv).pipe(
+        Effect.map(stampIdentity),
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
+      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<PiSettings>>({
+        maintenanceCapabilities: PI_MAINTENANCE_CAPABILITIES,
+        getSettings: snapshotSettings.getSettings,
+        streamSettings: snapshotSettings.streamSettings,
+        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
+        initialSnapshot: (settings) =>
+          buildInitialPiProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+        checkProvider,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: PI_DRIVER_KIND,
+              instanceId,
+              detail: `Failed to build Pi snapshot: ${cause.message ?? String(cause)}`,
+              cause,
+            }),
+        ),
+      );
 
       return {
         instanceId,
@@ -97,7 +140,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         displayName,
         accentColor,
         enabled,
-        snapshot: makeStaticPiProvider(providerSnapshot, PI_MAINTENANCE_CAPABILITIES),
+        snapshot,
         adapter: makePiAdapter({ environment: processEnv }),
         textGeneration: makePiTextGeneration(),
       } satisfies ProviderInstance;

@@ -121,6 +121,9 @@ export interface PiRpcRuntimeOptions {
   readonly gracefulCloseTimeout?: Duration.Input;
   readonly forceKillAfter?: Duration.Input;
   readonly protocolLogger?: (event: PiRpcProtocolLogEvent) => Effect.Effect<void, never>;
+  readonly extensionUiRequestHandler?: (
+    request: PiExtensionUiRequest,
+  ) => Effect.Effect<PiExtensionUiResponse | undefined, never>;
 }
 
 type Pending = {
@@ -365,6 +368,26 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
     yield* Deferred.succeed(match.deferred, response);
   });
 
+  const writeHandledExtensionUiResponse = Effect.fn("PiRpcRuntime.writeHandledExtensionUiResponse")(
+    function* (response: PiExtensionUiResponse) {
+      if ((yield* Ref.get(state)) !== "open") return;
+      const shouldWrite = yield* Ref.modify(answeredDialogs, (current) => {
+        if (current.has(response.id)) return [false, current] as const;
+        const next = new Set(current);
+        next.add(response.id);
+        return [true, next] as const;
+      });
+      if (!shouldWrite) return;
+      yield* Ref.update(extensionDialogs, (current) => {
+        const next = new Set(current);
+        next.delete(response.id);
+        return next;
+      });
+      yield* logProtocol({ direction: "outgoing", payload: response });
+      yield* Queue.offer(input, serializePiRpcJsonl(response)).pipe(Effect.asVoid);
+    },
+  );
+
   const rejectMalformedResponse = Effect.fn("PiRpcRuntime.rejectMalformedResponse")(function* (
     payload: unknown,
     cause: unknown,
@@ -444,6 +467,10 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
         const request = decoded.success as PiExtensionUiRequest;
         if (["select", "confirm", "input", "editor"].includes(request.method)) {
           yield* Ref.update(extensionDialogs, (current) => new Set(current).add(request.id));
+        }
+        if (options.extensionUiRequestHandler) {
+          const response = yield* options.extensionUiRequestHandler(request);
+          if (response) yield* writeHandledExtensionUiResponse(response);
         }
       }
       yield* PubSub.publish(events, { _tag: "Known", event: decoded.success });

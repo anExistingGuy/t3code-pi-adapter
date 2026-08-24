@@ -119,10 +119,10 @@ export const PiAgentMessage = Schema.Union([
 export type PiAgentMessage = typeof PiAgentMessage.Type;
 
 export const PiModel = Schema.Struct({
-  id: Schema.String,
+  id: Schema.NonEmptyString,
   name: Schema.String,
   api: Schema.String,
-  provider: Schema.String,
+  provider: Schema.NonEmptyString,
   baseUrl: Schema.String,
   reasoning: Schema.Boolean,
   input: Schema.Array(Schema.String),
@@ -299,14 +299,25 @@ export const PiSessionTreeNode: Schema.Schema<PiSessionTreeNode> = Schema.suspen
   }),
 );
 
+export const PiSourceInfo = Schema.Struct({
+  path: Schema.String,
+  source: Schema.String,
+  scope: Schema.Literals(["user", "project", "temporary"]),
+  origin: Schema.Literals(["package", "top-level"]),
+  baseDir: Schema.optional(Schema.String),
+});
+export type PiSourceInfo = typeof PiSourceInfo.Type;
+
 export const PiSlashCommand = Schema.Struct({
   name: Schema.String,
   description: Schema.optional(Schema.String),
   source: Schema.Literals(["extension", "prompt", "skill"]),
-  sourceInfo: Schema.optional(Schema.Unknown),
+  sourceInfo: Schema.optional(PiSourceInfo),
+  // Kept for compatibility with older Pi RPC payloads.
   location: Schema.optional(Schema.String),
   path: Schema.optional(Schema.String),
 });
+export type PiSlashCommand = typeof PiSlashCommand.Type;
 
 export const PiBashResult = Schema.Struct({
   output: Schema.String,
