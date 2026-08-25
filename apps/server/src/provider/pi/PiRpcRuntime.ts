@@ -124,6 +124,8 @@ export interface PiRpcRuntimeOptions {
   readonly extensionUiRequestHandler?: (
     request: PiExtensionUiRequest,
   ) => Effect.Effect<PiExtensionUiResponse | undefined, never>;
+  /** Acquisition-time event sink for owners that cannot tolerate a PubSub subscription gap. */
+  readonly eventHandler?: (event: PiRpcEvent) => Effect.Effect<void, never>;
 }
 
 type Pending = {
@@ -473,16 +475,20 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
           if (response) yield* writeHandledExtensionUiResponse(response);
         }
       }
-      yield* PubSub.publish(events, { _tag: "Known", event: decoded.success });
+      const event = { _tag: "Known", event: decoded.success } as const;
+      if (options.eventHandler) yield* options.eventHandler(event);
+      yield* PubSub.publish(events, event);
       return;
     }
 
     yield* publishDiagnostic({ _tag: "UnknownEvent", type: typed.success.type });
-    yield* PubSub.publish(events, {
+    const event = {
       _tag: "Unknown",
       type: typed.success.type,
       payload: json.success as Readonly<Record<string, unknown>>,
-    });
+    } as const;
+    if (options.eventHandler) yield* options.eventHandler(event);
+    yield* PubSub.publish(events, event);
   });
 
   const consumeDecoderResult = (result: ReturnType<PiRpcJsonlDecoder["push"]>) =>

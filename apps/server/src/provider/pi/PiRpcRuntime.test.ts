@@ -227,6 +227,29 @@ nodeIt("PiRpcRuntime", (it) => {
       }).pipe(Effect.scoped),
   );
 
+  it.effect("delivers events to an acquisition-time sink without a subscription gap", () =>
+    Effect.gen(function* () {
+      const observed: string[] = [];
+      const runtime = yield* makePiRpcRuntime({
+        eventHandler: (event) =>
+          Effect.sync(() => {
+            observed.push(event._tag === "Known" ? event.event.type : event.type);
+          }),
+        launch: {
+          binaryPath: process.execPath,
+          binaryArgs: [mockPath],
+          launchArgs: "",
+          cwd: process.cwd(),
+          env: {},
+          session: { mode: "ephemeral" },
+        },
+      });
+      yield* runtime.prompt({ message: "events" });
+      expect(observed).toEqual(["future_event", "message_update"]);
+      yield* runtime.close;
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("cancels outstanding extension dialogs before graceful close", () =>
     Effect.gen(function* () {
       const runtime = yield* makeRuntime();

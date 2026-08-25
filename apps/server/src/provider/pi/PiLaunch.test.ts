@@ -44,6 +44,7 @@ describe("Pi launch policy", () => {
       session: { mode: "ephemeral" },
       model: { provider: "custom/provider", id: "model/id with spaces" },
       thinkingLevel: "xhigh",
+      sessionName: " T3 session ",
     });
 
     expect(spec).toMatchObject({
@@ -62,12 +63,15 @@ describe("Pi launch policy", () => {
       "model/id with spaces",
       "--thinking",
       "xhigh",
+      "--name",
+      "T3 session",
     ]);
   });
 
   it("rejects adapter-owned flags and positional prompts", () => {
     expect(validatePiLaunchArgs("--provider custom")).toContain("--provider");
     expect(validatePiLaunchArgs("--mode=rpc")).toContain("--mode");
+    expect(validatePiLaunchArgs("--name custom")).toContain("--name");
     expect(validatePiLaunchArgs("hello")).toContain("initial prompt");
     expect(validatePiLaunchArgs("--verbose")).toBeUndefined();
   });

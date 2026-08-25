@@ -6,15 +6,19 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 import { makePiTextGeneration } from "../../textGeneration/PiTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makePiAdapter } from "../Layers/PiAdapter.ts";
+import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import {
   buildInitialPiProviderSnapshot,
   checkPiProviderStatus,
@@ -51,6 +55,10 @@ export type PiDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
+  | FileSystem.FileSystem
+  | Path.Path
+  | ProviderEventLoggers
+  | ServerConfig
   | ServerSettingsService;
 
 const stampInstanceIdentity = (input: {
@@ -81,6 +89,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
       const crypto = yield* Crypto.Crypto;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const serverSettings = yield* ServerSettingsService;
+      const eventLoggers = yield* ProviderEventLoggers;
       const launchArgsIssue = validatePiLaunchArgs(config.launchArgs);
       if (launchArgsIssue !== undefined) {
         return yield* new ProviderDriverError({
@@ -141,7 +150,12 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        adapter: makePiAdapter({ environment: processEnv }),
+        adapter: yield* makePiAdapter({
+          environment: processEnv,
+          instanceId,
+          settings: effectiveConfig,
+          ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        }),
         textGeneration: makePiTextGeneration(),
       } satisfies ProviderInstance;
     }),

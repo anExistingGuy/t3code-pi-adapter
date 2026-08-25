@@ -11,6 +11,8 @@ const RESERVED_FLAGS = [
   "--provider",
   "--model",
   "--thinking",
+  "--name",
+  "-n",
   "--print",
   "-p",
 ] as const;
@@ -83,6 +85,7 @@ export interface PiLaunchInput {
     readonly id: string;
   };
   readonly thinkingLevel?: string;
+  readonly sessionName?: string;
 }
 
 export interface PiLaunchSpec {
@@ -109,6 +112,9 @@ export function buildPiLaunchSpec(input: PiLaunchInput): PiLaunchSpec {
   }
   if (input.thinkingLevel) {
     args.push("--thinking", input.thinkingLevel);
+  }
+  if (input.sessionName?.trim()) {
+    args.push("--name", input.sessionName.trim());
   }
   return {
     command: input.binaryPath,

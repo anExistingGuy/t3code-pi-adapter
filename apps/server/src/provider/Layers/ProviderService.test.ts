@@ -23,6 +23,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, describe, vi } from "@effect/vitest";
 
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -1915,6 +1916,61 @@ validation.layer("ProviderServiceLive validation", (it) => {
       }
       assert.equal(failure.failure.operation, "ProviderService.startSession");
       assert.equal(failure.failure.issue.includes("invalid-provider"), true);
+    }),
+  );
+
+  it.effect("routes a provider request while startSession is still in flight", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-startup-request");
+      const startReached = yield* Deferred.make<ProviderSessionStartInput>();
+      const answered = yield* Deferred.make<void>();
+
+      validation.codex.startSession.mockImplementationOnce((input: ProviderSessionStartInput) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(startReached, input);
+          yield* Deferred.await(answered);
+          const now = "2026-01-01T00:00:00.000Z";
+          return {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            status: "ready",
+            threadId: input.threadId,
+            runtimeMode: input.runtimeMode,
+            cwd: input.cwd ?? process.cwd(),
+            createdAt: now,
+            updatedAt: now,
+          } satisfies ProviderSession;
+        }),
+      );
+      validation.codex.hasSession.mockImplementationOnce(() => Effect.succeed(true));
+      validation.codex.respondToRequest.mockImplementationOnce(() =>
+        Deferred.succeed(answered, undefined).pipe(Effect.asVoid),
+      );
+
+      const startFiber = yield* provider
+        .startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/project-startup-request",
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(startReached);
+      yield* provider.respondToRequest({
+        threadId,
+        requestId: asRequestId("startup-request"),
+        decision: "accept",
+      });
+      const session = yield* Fiber.join(startFiber);
+
+      assert.equal(session.threadId, threadId);
+      assert.deepEqual(validation.codex.respondToRequest.mock.calls.at(-1), [
+        threadId,
+        asRequestId("startup-request"),
+        "accept",
+      ]);
     }),
   );
 

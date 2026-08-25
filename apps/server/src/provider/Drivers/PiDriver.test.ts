@@ -12,7 +12,9 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "../Layers/ProviderInstanceRegistryLive.ts";
 import { PiDriver, resolvePiInstanceEnvironment, validatePiLaunchArgs } from "./PiDriver.ts";
 
@@ -53,6 +55,8 @@ describe("PiDriver launch policy", () => {
       "--provider anthropic",
       "--model sonnet",
       "--thinking high",
+      "--name custom",
+      "-n custom",
       "--print",
       "-p",
       "hello pi",
@@ -101,6 +105,10 @@ const driverIt = it.layer(
     NodeServices.layer,
     BackgroundPolicyAlwaysRunLayer,
     ServerSettingsService.layerTest(),
+    Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+    ServerConfig.layerTest(process.cwd(), { prefix: "pi-driver-test-" }).pipe(
+      Layer.provide(NodeServices.layer),
+    ),
   ),
 );
 

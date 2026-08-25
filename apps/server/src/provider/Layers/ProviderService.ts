@@ -649,6 +649,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
+        // Persist routing before the adapter finishes startup. Headless providers
+        // may emit a blocking startup request before their command loop is
+        // ready; the response must be routable while startSession is still in
+        // flight rather than deadlocking behind the final session binding.
+        yield* directory.upsert({
+          threadId,
+          provider: resolvedProvider,
+          providerInstanceId: resolvedInstanceId,
+          runtimeMode: input.runtimeMode,
+          status: "starting",
+          ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
+          runtimePayload: {
+            cwd: effectiveCwd ?? null,
+            ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+            activeTurnId: null,
+            lastRuntimeEvent: "provider.startSession.requested",
+            lastRuntimeEventAt: yield* nowIso,
+          },
+        });
         const session = yield* adapter
           .startSession({
             ...input,
