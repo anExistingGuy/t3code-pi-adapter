@@ -53,6 +53,46 @@ describe("PiRpcProtocol", () => {
     }),
   );
 
+  it.effect("decodes tool-call starts and typed extension messages", () =>
+    Effect.gen(function* () {
+      const toolStart = yield* decodePiRpcKnownEvent({
+        type: "message_update",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        assistantMessageEvent: {
+          type: "toolcall_start",
+          contentIndex: 2,
+          id: "call-1",
+          toolName: "extension_tool",
+        },
+      });
+      const custom = yield* decodePiRpcKnownEvent({
+        type: "message_end",
+        message: {
+          role: "custom",
+          customType: "notice",
+          content: "hello",
+          display: true,
+          details: { future: true },
+          timestamp: 1,
+        },
+      });
+
+      expect(toolStart).toMatchObject({
+        assistantMessageEvent: { id: "call-1", toolName: "extension_tool" },
+      });
+      expect(custom).toMatchObject({
+        message: { role: "custom", customType: "notice", display: true },
+      });
+    }),
+  );
+
   it.effect("rejects malformed known events", () =>
     Effect.gen(function* () {
       const result = yield* decodePiRpcKnownEvent({

@@ -251,6 +251,65 @@ nodeIt("PiAdapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("translates assistant, reasoning, arbitrary tools, usage, and settlement", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter();
+      const threadId = ThreadId.make("pi-runtime-events");
+      yield* adapter.startSession(startInput(threadId));
+      const observed = yield* Stream.runCollect(
+        Stream.takeUntil(
+          Stream.filter(adapter.streamEvents, (event) => event.threadId === threadId),
+          (event) => event.type === "turn.completed",
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      const usageReconciliation = yield* Stream.runCollect(
+        Stream.take(
+          Stream.filter(
+            adapter.streamEvents,
+            (event) => event.threadId === threadId && event.type === "thread.token-usage.updated",
+          ),
+          2,
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+
+      yield* adapter.sendTurn({ threadId, input: "events" });
+      const events = Array.from(yield* Fiber.join(observed));
+      const usageEvents = Array.from(yield* Fiber.join(usageReconciliation));
+      expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
+      expect(
+        events.some(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "assistant_text" &&
+            event.payload.delta === " answer",
+        ),
+      ).toBe(true);
+      expect(
+        events.some(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind === "reasoning_text",
+        ),
+      ).toBe(true);
+      const tool = events.find(
+        (event) => event.type === "item.completed" && event.itemId === "mock-extension-tool",
+      );
+      expect(tool).toMatchObject({
+        type: "item.completed",
+        providerInstanceId: instanceId,
+        payload: { itemType: "dynamic_tool_call", status: "completed" },
+      });
+      expect(events.some((event) => event.type === "thread.token-usage.updated")).toBe(true);
+      expect(
+        usageEvents.some(
+          (event) =>
+            event.type === "thread.token-usage.updated" &&
+            event.payload.usage.totalProcessedTokens === 130,
+        ),
+      ).toBe(true);
+      expect(events.every((event) => event.providerInstanceId === instanceId)).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("reuses the active turn for steer and follow-up, then interrupts once", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig;
@@ -286,6 +345,14 @@ nodeIt("PiAdapter", (it) => {
       expect(types).toContain("follow_up");
       expect(types.filter((type) => type === "abort")).toHaveLength(1);
       expect((yield* adapter.listSessions())[0]?.status).toBe("ready");
+
+      const nextCompletion = yield* Stream.runHead(
+        Stream.filter(adapter.streamEvents, (event) => event.type === "turn.completed"),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      const next = yield* adapter.sendTurn({ threadId, input: "events" });
+      const completion = yield* Fiber.join(nextCompletion);
+      expect(completion._tag).toBe("Some");
+      if (completion._tag === "Some") expect(completion.value.turnId).toBe(next.turnId);
     }).pipe(Effect.scoped),
   );
 

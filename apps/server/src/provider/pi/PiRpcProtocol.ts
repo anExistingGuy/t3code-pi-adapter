@@ -45,6 +45,7 @@ export const PiToolCallContent = Schema.Struct({
   thoughtSignature: Schema.optional(Schema.String),
   namespace: Schema.optional(Schema.String),
 });
+export type PiToolCallContent = typeof PiToolCallContent.Type;
 
 export const PiUsage = Schema.Struct({
   input: Schema.Number,
@@ -85,6 +86,7 @@ export const PiAssistantMessage = Schema.Struct({
   timestamp: Schema.Number,
   errorMessage: Schema.optional(Schema.String),
 });
+export type PiAssistantMessage = typeof PiAssistantMessage.Type;
 
 export const PiToolResultMessage = Schema.Struct({
   role: Schema.Literal("toolResult"),
@@ -108,12 +110,41 @@ export const PiBashExecutionMessage = Schema.Struct({
   timestamp: Schema.Number,
 });
 
+export const PiCustomMessage = Schema.Struct({
+  role: Schema.Literal("custom"),
+  customType: Schema.String,
+  content: Schema.Union([
+    Schema.String,
+    Schema.Array(Schema.Union([PiTextContent, PiImageContent])),
+  ]),
+  display: Schema.Boolean,
+  details: Schema.optional(Schema.Unknown),
+  timestamp: Schema.Number,
+});
+
+export const PiBranchSummaryMessage = Schema.Struct({
+  role: Schema.Literal("branchSummary"),
+  summary: Schema.String,
+  fromId: Schema.String,
+  timestamp: Schema.Number,
+});
+
+export const PiCompactionSummaryMessage = Schema.Struct({
+  role: Schema.Literal("compactionSummary"),
+  summary: Schema.String,
+  tokensBefore: Schema.Number,
+  timestamp: Schema.Number,
+});
+
 /** Extensions may add custom message roles, so preserve an unknown fallback. */
 export const PiAgentMessage = Schema.Union([
   PiUserMessage,
   PiAssistantMessage,
   PiToolResultMessage,
   PiBashExecutionMessage,
+  PiCustomMessage,
+  PiBranchSummaryMessage,
+  PiCompactionSummaryMessage,
   Schema.Struct({ role: Schema.String }),
 ]);
 export type PiAgentMessage = typeof PiAgentMessage.Type;
@@ -270,7 +301,7 @@ export const PiCompactionResult = Schema.Struct({
   summary: Schema.String,
   firstKeptEntryId: Schema.String,
   tokensBefore: Schema.Number,
-  estimatedTokensAfter: Schema.Number,
+  estimatedTokensAfter: Schema.optional(Schema.Number),
   usage: Schema.optional(PiUsage),
   details: Schema.optional(Schema.Unknown),
 });
@@ -351,6 +382,7 @@ export const PiSessionStats = Schema.Struct({
     }),
   ),
 });
+export type PiSessionStats = typeof PiSessionStats.Type;
 
 const responseDataSchemas = {
   prompt: Schema.Void,
@@ -517,7 +549,11 @@ const assistantDelta = Schema.Union([
     contentIndex: Schema.Number,
     content: Schema.optional(Schema.String),
   }),
-  baseEvent("toolcall_start", { contentIndex: Schema.Number }),
+  baseEvent("toolcall_start", {
+    contentIndex: Schema.Number,
+    id: Schema.String,
+    toolName: Schema.String,
+  }),
   baseEvent("toolcall_delta", { contentIndex: Schema.Number, delta: Schema.String }),
   baseEvent("toolcall_end", { contentIndex: Schema.Number, toolCall: PiToolCallContent }),
   baseEvent("done", {

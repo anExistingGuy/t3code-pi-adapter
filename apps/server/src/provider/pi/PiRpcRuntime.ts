@@ -126,6 +126,8 @@ export interface PiRpcRuntimeOptions {
   ) => Effect.Effect<PiExtensionUiResponse | undefined, never>;
   /** Acquisition-time event sink for owners that cannot tolerate a PubSub subscription gap. */
   readonly eventHandler?: (event: PiRpcEvent) => Effect.Effect<void, never>;
+  /** Acquisition-time diagnostic sink; malformed startup records must not be lost. */
+  readonly diagnosticHandler?: (diagnostic: PiRpcDiagnostic) => Effect.Effect<void, never>;
 }
 
 type Pending = {
@@ -303,7 +305,10 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
           )
       : Effect.void;
   const publishDiagnostic = (diagnostic: PiRpcDiagnostic) =>
-    PubSub.publish(diagnostics, diagnostic).pipe(Effect.asVoid);
+    (options.diagnosticHandler ? options.diagnosticHandler(diagnostic) : Effect.void).pipe(
+      Effect.andThen(PubSub.publish(diagnostics, diagnostic)),
+      Effect.asVoid,
+    );
 
   const currentStderr = Ref.get(stderrBytes).pipe(
     Effect.map((bytes) => new TextDecoder().decode(bytes)),

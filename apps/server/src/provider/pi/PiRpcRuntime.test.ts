@@ -28,6 +28,7 @@ function makeRuntime(input?: {
   readonly logs?: PiRpcProtocolLogEvent[];
   readonly gracefulCloseTimeout?: Duration.Input;
   readonly extensionUiRequestHandler?: PiRpcRuntimeOptions["extensionUiRequestHandler"];
+  readonly diagnosticHandler?: PiRpcRuntimeOptions["diagnosticHandler"];
 }) {
   return makePiRpcRuntime({
     launch: {
@@ -46,6 +47,7 @@ function makeRuntime(input?: {
     ...(input?.extensionUiRequestHandler
       ? { extensionUiRequestHandler: input.extensionUiRequestHandler }
       : {}),
+    ...(input?.diagnosticHandler ? { diagnosticHandler: input.diagnosticHandler } : {}),
     ...(input?.logs
       ? {
           protocolLogger: (event: PiRpcProtocolLogEvent) =>
@@ -103,6 +105,22 @@ nodeIt("PiRpcRuntime", (it) => {
         "MalformedRecord",
         "UnknownEvent",
       ]);
+      yield* runtime.close;
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("delivers malformed records to the direct diagnostic sink", () =>
+    Effect.gen(function* () {
+      const observed: string[] = [];
+      const runtime = yield* makeRuntime({
+        diagnosticHandler: (diagnostic) =>
+          Effect.sync(() => {
+            observed.push(diagnostic._tag);
+          }),
+      });
+
+      yield* runtime.prompt({ message: "events" });
+      expect(observed).toEqual(["EmptyRecord", "MalformedJson", "MalformedRecord", "UnknownEvent"]);
       yield* runtime.close;
     }).pipe(Effect.scoped),
   );

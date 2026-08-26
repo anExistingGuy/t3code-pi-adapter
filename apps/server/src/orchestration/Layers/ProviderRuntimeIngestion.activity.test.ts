@@ -82,6 +82,38 @@ describe("runtimeEventToActivities task progress", () => {
     expect(usagePayload).not.toHaveProperty("status");
   });
 });
+describe("runtimeEventToActivities reasoning", () => {
+  it("projects completed reasoning as bounded informational work", () => {
+    const event = {
+      ...base,
+      type: "item.completed",
+      eventId: EventId.make("evt-reasoning-completed"),
+      payload: {
+        itemType: "reasoning",
+        status: "completed",
+        title: "Reasoning",
+        detail: "considered the implementation",
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    expect(runtimeEventToActivities(event)).toEqual([
+      {
+        id: "evt-reasoning-completed",
+        createdAt: base.createdAt,
+        tone: "info",
+        kind: "reasoning.completed",
+        summary: "Reasoning",
+        payload: {
+          itemType: "reasoning",
+          status: "completed",
+          detail: "considered the implementation",
+        },
+        turnId: null,
+      },
+    ]);
+  });
+});
+
 describe("runtimeEventToActivities tool streaming persistence", () => {
   const accumulatedStdout = [
     "first line of output",

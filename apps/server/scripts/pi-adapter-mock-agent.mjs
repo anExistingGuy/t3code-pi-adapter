@@ -69,6 +69,107 @@ function settle() {
   pendingCount = 0;
   write({ type: "agent_settled" });
 }
+function usage(input = 100, output = 20) {
+  return {
+    input,
+    output,
+    cacheRead: 10,
+    cacheWrite: 0,
+    reasoning: 5,
+    totalTokens: input + output + 10,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+function assistantMessage(stopReason = "stop") {
+  return {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "Mock reasoning" },
+      { type: "text", text: "Mock answer" },
+      {
+        type: "toolCall",
+        id: "mock-extension-tool",
+        name: "extension_magic",
+        arguments: { target: "fixture" },
+      },
+    ],
+    api: "mock-api",
+    provider: model.provider,
+    model: model.id,
+    usage: usage(),
+    stopReason,
+    timestamp: Date.now(),
+  };
+}
+function emitCanonicalFixture() {
+  const message = assistantMessage();
+  streaming = true;
+  write({ type: "agent_start" });
+  write({ type: "turn_start" });
+  write({ type: "message_start", message: { ...message, content: [] } });
+  write({
+    type: "message_update",
+    usage: { ...usage(0, 0), cacheRead: 0, totalTokens: 0 },
+    assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+  });
+  write({
+    type: "message_update",
+    usage: usage(),
+    assistantMessageEvent: {
+      type: "thinking_delta",
+      contentIndex: 0,
+      delta: "Mock reasoning",
+    },
+  });
+  write({
+    type: "message_update",
+    usage: usage(),
+    assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Mock reasoning" },
+  });
+  write({
+    type: "message_update",
+    usage: usage(),
+    assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Mock" },
+  });
+  write({
+    type: "message_update",
+    usage: usage(),
+    assistantMessageEvent: { type: "text_end", contentIndex: 1, content: "Mock answer" },
+  });
+  write({
+    type: "message_update",
+    usage: usage(),
+    assistantMessageEvent: {
+      type: "toolcall_end",
+      contentIndex: 2,
+      toolCall: message.content[2],
+    },
+  });
+  write({
+    type: "tool_execution_start",
+    toolCallId: "mock-extension-tool",
+    toolName: "extension_magic",
+    args: { target: "fixture" },
+  });
+  write({
+    type: "tool_execution_update",
+    toolCallId: "mock-extension-tool",
+    toolName: "extension_magic",
+    args: { target: "fixture" },
+    partialResult: { content: [{ type: "text", text: "partial output" }] },
+  });
+  write({
+    type: "tool_execution_end",
+    toolCallId: "mock-extension-tool",
+    toolName: "extension_magic",
+    result: { content: [{ type: "text", text: "final output" }], details: { fixture: true } },
+    isError: false,
+  });
+  write({ type: "message_end", message });
+  write({ type: "turn_end", message, toolResults: [] });
+  write({ type: "agent_end", messages: [message], willRetry: false });
+  settle();
+}
 function handle(command) {
   log({ kind: "command", command });
   if (command.type === "extension_ui_response") {
@@ -121,6 +222,20 @@ function handle(command) {
         process.stdin.destroy();
       }
       return;
+    case "get_session_stats":
+      response(command, {
+        sessionFile: "/mock/persistent-session.jsonl",
+        sessionId: "mock-persistent-session",
+        userMessages: 1,
+        assistantMessages: 1,
+        toolCalls: 1,
+        toolResults: 1,
+        totalMessages: 4,
+        tokens: { input: 100, output: 20, cacheRead: 10, cacheWrite: 0, total: 130 },
+        cost: 0,
+        contextUsage: { tokens: 130, contextWindow: model.contextWindow, percent: 0.13 },
+      });
+      return;
     case "get_available_thinking_levels":
       response(command, { levels: ["off", "low", "high", "max"] });
       return;
@@ -136,6 +251,10 @@ function handle(command) {
     case "prompt":
       response(command);
       if (command.message.startsWith("/instant")) return;
+      if (command.message === "events") {
+        emitCanonicalFixture();
+        return;
+      }
       streaming = true;
       leafCounter += 1;
       write({ type: "agent_start" });

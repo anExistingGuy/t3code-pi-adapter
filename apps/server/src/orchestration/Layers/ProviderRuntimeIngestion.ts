@@ -819,6 +819,26 @@ export function runtimeEventToActivities(
     }
 
     case "item.completed": {
+      if (event.payload.itemType === "reasoning") {
+        return [
+          {
+            id: event.eventId,
+            createdAt: event.createdAt,
+            tone: event.payload.status === "failed" ? "error" : "info",
+            kind: "reasoning.completed",
+            summary: event.payload.title ?? "Reasoning",
+            payload: {
+              itemType: event.payload.itemType,
+              ...(event.payload.status ? { status: event.payload.status } : {}),
+              ...(event.payload.detail
+                ? { detail: truncateDetail(event.payload.detail, 4_096) }
+                : {}),
+            },
+            turnId: toTurnId(event.turnId) ?? null,
+            ...maybeSequence,
+          },
+        ];
+      }
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }

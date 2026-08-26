@@ -59,12 +59,22 @@ import {
 } from "../pi/PiRpcProtocol.ts";
 import {
   makePiRpcRuntime,
+  type PiRpcDiagnostic,
   type PiRpcError,
   type PiRpcEvent,
   type PiRpcExit,
   type PiRpcRuntime,
 } from "../pi/PiRpcRuntime.ts";
 import { makePiNativeLoggerFactory } from "../pi/PiRpcNativeLogging.ts";
+import {
+  boundPiRuntimeValue,
+  makePiRuntimeTranslationState,
+  piSessionStatsUsageSnapshot,
+  translatePiRpcEvent,
+  type PiRuntimeEventDraft,
+  type PiRuntimeTranslationState,
+  type PiTerminalOutcome,
+} from "../pi/PiRuntimeEvents.ts";
 
 const PI_RESUME_VERSION = 1 as const;
 const isPiThinkingLevel = Schema.is(PiThinkingLevel);
@@ -114,6 +124,9 @@ interface PiSessionContext {
   sessionId: string | undefined;
   leafId: string | null;
   extensionCommands: Set<string>;
+  readonly translation: PiRuntimeTranslationState;
+  readonly warnedUnknownEventTypes: Set<string>;
+  currentContextWindow: number | undefined;
   stopped: boolean;
   exitEmitted: boolean;
 }
@@ -252,8 +265,11 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
 
   const settleActiveTurn = Effect.fn("PiAdapter.settleActiveTurn")(function* (
     context: PiSessionContext,
-    state: "completed" | "failed" | "cancelled",
+    state: "completed" | "failed" | "interrupted" | "cancelled",
     errorMessage?: string,
+    stopReason?: string | null,
+    usage?: unknown,
+    raw?: ProviderRuntimeEvent["raw"],
   ) {
     const turnId = context.activeTurnId;
     if (!turnId || context.interruptedTurnIds.has(turnId)) return;
@@ -262,13 +278,16 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
       type: "turn.completed",
       ...(yield* stamp()),
       provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
       threadId: context.threadId,
       turnId,
       payload: {
         state,
-        stopReason: state === "cancelled" ? "aborted" : null,
+        stopReason: stopReason ?? (state === "cancelled" ? "aborted" : null),
+        ...(usage === undefined ? {} : { usage }),
         ...(errorMessage ? { errorMessage } : {}),
       },
+      ...(raw ? { raw } : {}),
     });
   });
 
@@ -291,6 +310,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
       type: "runtime.error",
       ...(yield* stamp()),
       provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
       threadId: context.threadId,
       payload: { message: detail, class: "provider_error" },
     });
@@ -298,10 +318,96 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
       type: "session.exited",
       ...(yield* stamp()),
       provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
       threadId: context.threadId,
       payload: { exitKind: "error", reason: detail, recoverable: true },
     });
     yield* scheduleSessionScopeClose(context);
+  });
+
+  const emitTranslatedEvent = Effect.fn("PiAdapter.emitTranslatedEvent")(function* (
+    context: PiSessionContext,
+    nativeEvent: PiRpcKnownEvent,
+    draft: PiRuntimeEventDraft,
+  ) {
+    const event = {
+      ...draft,
+      ...(yield* stamp()),
+      provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
+      threadId: context.threadId,
+      ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+      raw: {
+        source: "pi.rpc" as const,
+        method: nativeEvent.type,
+        payload: boundPiRuntimeValue(nativeEvent),
+      },
+    } as ProviderRuntimeEvent;
+    yield* offer(event);
+  });
+
+  const reconcileSessionStats = (
+    context: PiSessionContext,
+    generation: number,
+    turnId: TurnId | undefined,
+  ) =>
+    context.rpc.getSessionStats.pipe(
+      Effect.flatMap((stats) => {
+        if (context.stopped || context.generation !== generation) return Effect.void;
+        const usage = piSessionStatsUsageSnapshot(stats);
+        if (!usage) return Effect.void;
+        return stamp().pipe(
+          Effect.flatMap((eventStamp) =>
+            offer({
+              type: "thread.token-usage.updated",
+              ...eventStamp,
+              provider: PI_DRIVER_KIND,
+              providerInstanceId: context.instanceId,
+              threadId: context.threadId,
+              ...(turnId ? { turnId } : {}),
+              payload: { usage },
+              raw: {
+                source: "pi.rpc",
+                method: "get_session_stats",
+                payload: boundPiRuntimeValue(stats),
+              },
+            }),
+          ),
+        );
+      }),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to reconcile Pi session statistics.", {
+          threadId: context.threadId,
+          cause,
+        }),
+      ),
+      Effect.forkIn(context.scope),
+      Effect.asVoid,
+    );
+
+  const settleTranslatedOutcome = Effect.fn("PiAdapter.settleTranslatedOutcome")(function* (
+    context: PiSessionContext,
+    outcome: PiTerminalOutcome,
+  ) {
+    if (outcome.warning) {
+      yield* offer({
+        type: "runtime.warning",
+        ...(yield* stamp()),
+        provider: PI_DRIVER_KIND,
+        providerInstanceId: context.instanceId,
+        threadId: context.threadId,
+        turnId: context.activeTurnId,
+        payload: { message: outcome.warning },
+      });
+    }
+    yield* settleActiveTurn(
+      context,
+      outcome.state,
+      outcome.errorMessage,
+      outcome.stopReason,
+      outcome.usage,
+      { source: "pi.rpc", method: "agent_settled", payload: { type: "agent_settled" } },
+    );
   });
 
   const handleEvent = Effect.fn("PiAdapter.handleEvent")(function* (
@@ -312,39 +418,130 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
     switch (event.type) {
       case "agent_start":
         context.generationSawAgent = true;
-        return;
+        break;
       case "queue_update":
         context.queuedContinuation = event.steering.length > 0 || event.followUp.length > 0;
-        return;
+        break;
       case "entry_appended":
         context.leafId = event.entry.id;
-        return;
+        break;
       case "thinking_level_changed":
         context.currentThinkingLevel = event.level;
-        return;
-      case "session_info_changed":
-        return;
-      case "extension_error":
-        yield* offer({
-          type: "runtime.warning",
-          ...(yield* stamp()),
-          provider: PI_DRIVER_KIND,
-          threadId: context.threadId,
-          turnId: context.activeTurnId,
-          payload: { message: event.error, detail: { extensionPath: event.extensionPath } },
-          raw: { source: "pi.rpc", method: event.type, payload: event },
-        });
-        return;
-      case "agent_settled":
-        if (context.ignoredSettlements > 0) {
-          context.ignoredSettlements -= 1;
-          return;
-        }
-        yield* settleActiveTurn(context, "completed");
-        return;
-      default:
-        return;
+        break;
     }
+
+    if (
+      event.type === "agent_settled" &&
+      context.activeTurnId === undefined &&
+      context.ignoredSettlements === 0
+    ) {
+      return;
+    }
+
+    if (
+      context.activeTurnId === undefined &&
+      context.ignoredSettlements > 0 &&
+      event.type !== "agent_settled"
+    ) {
+      return;
+    }
+
+    if (
+      context.activeTurnId === undefined &&
+      event.type !== "agent_settled" &&
+      (event.type === "agent_start" ||
+        event.type === "agent_end" ||
+        event.type === "turn_start" ||
+        event.type === "turn_end" ||
+        event.type === "message_start" ||
+        event.type === "message_update" ||
+        event.type === "message_end" ||
+        event.type === "tool_execution_start" ||
+        event.type === "tool_execution_update" ||
+        event.type === "tool_execution_end")
+    ) {
+      return;
+    }
+
+    const generation = context.activeGeneration ?? context.generation;
+    const turnId = context.activeTurnId;
+    const translated = translatePiRpcEvent(context.translation, event, {
+      generation,
+      ...(context.currentContextWindow === undefined
+        ? {}
+        : { contextWindow: context.currentContextWindow }),
+    });
+    yield* Effect.forEach(
+      translated.events,
+      (draft) => emitTranslatedEvent(context, event, draft),
+      { discard: true },
+    );
+
+    if (event.type === "agent_settled") {
+      if (context.ignoredSettlements > 0) {
+        context.ignoredSettlements -= 1;
+        return;
+      }
+      if (translated.settlement) yield* settleTranslatedOutcome(context, translated.settlement);
+    }
+    if (translated.reconcileStats) {
+      yield* reconcileSessionStats(context, generation, turnId);
+    }
+  });
+
+  const handleRpcEvent = Effect.fn("PiAdapter.handleRpcEvent")(function* (
+    context: PiSessionContext,
+    record: PiRpcEvent,
+  ) {
+    if (record._tag === "Known") {
+      yield* handleEvent(context, record.event);
+      return;
+    }
+    if (context.warnedUnknownEventTypes.has(record.type)) return;
+    context.warnedUnknownEventTypes.add(record.type);
+    yield* offer({
+      type: "runtime.warning",
+      ...(yield* stamp()),
+      provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
+      threadId: context.threadId,
+      turnId: context.activeTurnId,
+      payload: {
+        message: `Pi emitted an unsupported RPC event '${record.type}'.`,
+        detail: { eventType: record.type },
+      },
+      raw: { source: "pi.rpc", method: record.type, payload: boundPiRuntimeValue(record.payload) },
+    });
+  });
+
+  const handleDiagnostic = Effect.fn("PiAdapter.handleDiagnostic")(function* (
+    context: PiSessionContext,
+    diagnostic: PiRpcDiagnostic,
+  ) {
+    if (
+      diagnostic._tag !== "MalformedJson" &&
+      diagnostic._tag !== "MalformedRecord" &&
+      diagnostic._tag !== "EmptyRecord"
+    ) {
+      return;
+    }
+    yield* offer({
+      type: "runtime.warning",
+      ...(yield* stamp()),
+      provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
+      threadId: context.threadId,
+      turnId: context.activeTurnId,
+      payload: {
+        message: "Pi emitted a malformed RPC record.",
+        detail: {
+          diagnostic: diagnostic._tag,
+          ...(diagnostic._tag === "MalformedRecord" && diagnostic.type
+            ? { eventType: diagnostic.type }
+            : {}),
+        },
+      },
+    });
   });
 
   const scheduleSessionScopeClose = (context: PiSessionContext) =>
@@ -375,6 +572,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         type: "session.exited",
         ...(yield* stamp()),
         provider: PI_DRIVER_KIND,
+        providerInstanceId: context.instanceId,
         threadId: context.threadId,
         payload: { exitKind: "graceful" },
       });
@@ -411,6 +609,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         .setModel(requested.provider, requested.modelId)
         .pipe(Effect.mapError((error) => adapterError(context.threadId, "set_model", error)));
       context.currentModel = { provider: selected.provider, modelId: selected.id };
+      context.currentContextWindow = selected.contextWindow;
     }
 
     const rawThinking = getModelSelectionStringOptionValue(
@@ -527,7 +726,8 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         }
 
         const pendingDialogs = new Map<ApprovalRequestId, PiPendingDialog>();
-        const startupEvents: PiRpcKnownEvent[] = [];
+        const startupEvents: PiRpcEvent[] = [];
+        const startupDiagnostics: PiRpcDiagnostic[] = [];
         let registeredContext: PiSessionContext | undefined;
         const sessionScope = yield* Scope.make("sequential");
         const ready = yield* Deferred.make<void, ProviderAdapterError>();
@@ -539,13 +739,18 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             threadId: input.threadId,
           }),
           eventHandler: (record: PiRpcEvent) =>
-            (record._tag !== "Known"
-              ? Effect.void
-              : registeredContext
-                ? handleEvent(registeredContext, record.event)
-                : Effect.sync(() => {
-                    startupEvents.push(record.event);
-                  })
+            (registeredContext
+              ? handleRpcEvent(registeredContext, record)
+              : Effect.sync(() => {
+                  startupEvents.push(record);
+                })
+            ).pipe(Effect.catchCause(() => Effect.void)),
+          diagnosticHandler: (diagnostic) =>
+            (registeredContext
+              ? handleDiagnostic(registeredContext, diagnostic)
+              : Effect.sync(() => {
+                  startupDiagnostics.push(diagnostic);
+                })
             ).pipe(Effect.catchCause(() => Effect.void)),
           extensionUiRequestHandler: (request) =>
             Effect.gen(function* () {
@@ -568,6 +773,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                   type: "request.opened",
                   ...(yield* stamp()),
                   provider: PI_DRIVER_KIND,
+                  providerInstanceId: options.instanceId,
                   threadId: input.threadId,
                   requestId: RuntimeRequestId.make(request.id),
                   payload: {
@@ -577,7 +783,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                   raw: { source: "pi.rpc", method: request.type, payload: request },
                 });
               } else {
-                const options =
+                const dialogOptions =
                   request.method === "select"
                     ? request.options.map((label) => ({ label, description: label }))
                     : [];
@@ -585,6 +791,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                   type: "user-input.requested",
                   ...(yield* stamp()),
                   provider: PI_DRIVER_KIND,
+                  providerInstanceId: options.instanceId,
                   threadId: input.threadId,
                   requestId: RuntimeRequestId.make(request.id),
                   payload: {
@@ -598,7 +805,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                             : request.method === "editor"
                               ? (request.prefill ?? request.title)
                               : request.title,
-                        options,
+                        options: dialogOptions,
                       },
                     ],
                   },
@@ -677,15 +884,23 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           sessionId: cursor?.sessionId,
           leafId: cursor?.leafId ?? null,
           extensionCommands: new Set(),
+          translation: makePiRuntimeTranslationState(),
+          warnedUnknownEventTypes: new Set(),
+          currentContextWindow: undefined,
           stopped: false,
           exitEmitted: false,
         };
         registeredContext = context;
         sessions.set(input.threadId, context);
         yield* Deferred.succeed(contextRegistered, undefined);
-        yield* Effect.forEach(startupEvents, (event) => handleEvent(context, event), {
+        yield* Effect.forEach(startupEvents, (event) => handleRpcEvent(context, event), {
           discard: true,
         });
+        yield* Effect.forEach(
+          startupDiagnostics,
+          (diagnostic) => handleDiagnostic(context, diagnostic),
+          { discard: true },
+        );
 
         context.handshakeFiber = yield* Effect.gen(function* () {
           const state = yield* rpc.getState.pipe(
@@ -696,6 +911,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           context.currentModel = state.model
             ? { provider: state.model.provider, modelId: state.model.id }
             : context.currentModel;
+          context.currentContextWindow = state.model?.contextWindow;
           context.currentThinkingLevel = state.thinkingLevel;
           yield* rpc
             .setSteeringMode("one-at-a-time")
@@ -731,6 +947,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             type: "session.started",
             ...(yield* stamp()),
             provider: PI_DRIVER_KIND,
+            providerInstanceId: options.instanceId,
             threadId: input.threadId,
             payload: { resume: cursor },
           });
@@ -738,6 +955,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             type: "session.configured",
             ...(yield* stamp()),
             provider: PI_DRIVER_KIND,
+            providerInstanceId: options.instanceId,
             threadId: input.threadId,
             payload: {
               config: {
@@ -752,6 +970,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             type: "session.state.changed",
             ...(yield* stamp()),
             provider: PI_DRIVER_KIND,
+            providerInstanceId: options.instanceId,
             threadId: input.threadId,
             payload: { state: "ready", reason: "Pi RPC session ready" },
           });
@@ -759,6 +978,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             type: "thread.started",
             ...(yield* stamp()),
             provider: PI_DRIVER_KIND,
+            providerInstanceId: options.instanceId,
             threadId: input.threadId,
             payload: { providerThreadId: state.sessionId },
           });
@@ -778,6 +998,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                 type: "runtime.error",
                 ...(yield* stamp()),
                 provider: PI_DRIVER_KIND,
+                providerInstanceId: options.instanceId,
                 threadId: input.threadId,
                 payload: { message: error.message, class: "provider_error" },
               });
@@ -791,6 +1012,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                   type: "session.exited",
                   ...(yield* stamp()),
                   provider: PI_DRIVER_KIND,
+                  providerInstanceId: options.instanceId,
                   threadId: input.threadId,
                   payload: { exitKind: "error", reason: error.message, recoverable: true },
                 });
@@ -897,6 +1119,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
               type: "turn.started",
               ...(yield* stamp()),
               provider: PI_DRIVER_KIND,
+              providerInstanceId: context.instanceId,
               threadId: input.threadId,
               turnId,
               payload: context.session.model ? { model: context.session.model } : {},
@@ -973,6 +1196,9 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         context.ignoredSettlements += 1;
         yield* context.rpc.abort.pipe(Effect.ignore);
         yield* context.rpc.abortRetry.pipe(Effect.ignore);
+        // The state response is an ordering barrier for abort-side settlement events.
+        yield* context.rpc.getState.pipe(Effect.ignore);
+        context.ignoredSettlements = 0;
         for (const { request } of context.pendingDialogs.values()) {
           yield* context.rpc
             .sendExtensionUiResponse({
@@ -988,6 +1214,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           type: "turn.aborted",
           ...(yield* stamp()),
           provider: PI_DRIVER_KIND,
+          providerInstanceId: context.instanceId,
           threadId,
           turnId: interruptedTurnId,
           payload: { reason: "Interrupted by user" },
