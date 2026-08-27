@@ -16,6 +16,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { ServerConfig } from "../../config.ts";
 import { encodePiModelSlug } from "../pi/PiModelCatalog.ts";
@@ -34,13 +35,28 @@ const testLayer = Layer.mergeAll(
 const nodeIt = it.layer(testLayer);
 
 function makeTestAdapter(input?: {
-  readonly startupDialog?: boolean;
+  readonly startupDialog?: boolean | "select" | "confirm" | "input" | "editor";
+  readonly dialogTimeout?: number;
+  readonly dialogCrash?: boolean;
+  readonly permissionTool?: string;
+  readonly uiEvents?: boolean;
   readonly logPath?: string;
   readonly nativeRecords?: unknown[];
 }) {
   return makePiAdapter({
     environment: {
-      ...(input?.startupDialog ? { PI_ADAPTER_MOCK_STARTUP_DIALOG: "1" } : {}),
+      ...(input?.startupDialog
+        ? {
+            PI_ADAPTER_MOCK_STARTUP_DIALOG:
+              input.startupDialog === true ? "1" : input.startupDialog,
+          }
+        : {}),
+      ...(input?.dialogTimeout === undefined
+        ? {}
+        : { PI_ADAPTER_MOCK_DIALOG_TIMEOUT: String(input.dialogTimeout) }),
+      ...(input?.dialogCrash ? { PI_ADAPTER_MOCK_DIALOG_CRASH: "1" } : {}),
+      ...(input?.permissionTool ? { PI_ADAPTER_MOCK_PERMISSION_TOOL: input.permissionTool } : {}),
+      ...(input?.uiEvents ? { PI_ADAPTER_MOCK_UI_EVENTS: "1" } : {}),
       ...(input?.logPath ? { PI_ADAPTER_MOCK_LOG: input.logPath } : {}),
     },
     instanceId,
@@ -66,7 +82,10 @@ function makeTestAdapter(input?: {
   });
 }
 
-function startInput(threadId: ThreadId) {
+function startInput(
+  threadId: ThreadId,
+  runtimeMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access" = "full-access",
+) {
   return {
     provider: PI_DRIVER_KIND,
     providerInstanceId: instanceId,
@@ -78,7 +97,7 @@ function startInput(threadId: ThreadId) {
       model: encodePiModelSlug({ provider: "custom provider", modelId: "model/id" }),
       options: [{ id: "thinkingLevel", value: "high" }],
     },
-    runtimeMode: "full-access" as const,
+    runtimeMode,
   };
 }
 
@@ -97,37 +116,246 @@ nodeIt("PiAdapter", (it) => {
     "returns connecting before a startup dialog and lets the dialog unblock readiness",
     () =>
       Effect.gen(function* () {
-        const adapter = yield* makeTestAdapter({ startupDialog: true });
+        const config = yield* ServerConfig;
+        const logPath = NodePath.join(config.stateDir, "pi-startup-dialog.log");
+        const adapter = yield* makeTestAdapter({ startupDialog: true, logPath });
         const threadId = ThreadId.make("pi-startup-dialog");
         const lifecycle = yield* Stream.runCollect(
           Stream.takeUntil(
-            Stream.filter(adapter.streamEvents, (event) => event.type !== "request.opened"),
+            Stream.filter(adapter.streamEvents, (event) => event.type !== "user-input.requested"),
             (event) => event.type === "thread.started" && event.threadId === threadId,
           ),
         ).pipe(Effect.forkChild({ startImmediately: true }));
         const dialog = yield* Stream.runHead(
-          Stream.filter(adapter.streamEvents, (event) => event.type === "request.opened"),
+          Stream.filter(adapter.streamEvents, (event) => event.type === "user-input.requested"),
         ).pipe(Effect.forkChild({ startImmediately: true }));
 
         const session = yield* adapter.startSession(startInput(threadId));
         expect(session.status).toBe("connecting");
         expect(yield* adapter.hasSession(threadId)).toBe(true);
         expect((yield* Fiber.join(dialog))._tag).toBe("Some");
-        yield* adapter.respondToRequest(
-          threadId,
-          ApprovalRequestId.make("startup-dialog"),
-          "accept",
-        );
+        yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("startup-dialog"), {
+          "startup-dialog": "Yes",
+        });
 
         const events = Array.from(yield* Fiber.join(lifecycle));
         expect(events.map((event) => event.type)).toEqual([
+          "user-input.resolved",
           "session.started",
           "session.configured",
           "session.state.changed",
           "thread.started",
         ]);
         expect((yield* adapter.listSessions())[0]?.status).toBe("ready");
+        expect(
+          readLog(logPath).find(
+            (entry) => entry.kind === "command" && entry.command?.type === "extension_ui_response",
+          )?.command,
+        ).toMatchObject({ confirmed: true });
       }).pipe(Effect.scoped),
+  );
+
+  it.effect("bridges select, input, and editor dialogs with exact native responses", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      for (const [method, answer] of [
+        ["select", "Beta"],
+        ["input", "typed value"],
+        ["editor", "edited\ntext"],
+      ] as const) {
+        const logPath = NodePath.join(config.stateDir, `pi-${method}-dialog.log`);
+        const adapter = yield* makeTestAdapter({ startupDialog: method, logPath });
+        const threadId = ThreadId.make(`pi-${method}-dialog`);
+        const requested = yield* Stream.runHead(
+          Stream.filter(adapter.streamEvents, (event) => event.type === "user-input.requested"),
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        const resolved = yield* Stream.runHead(
+          Stream.filter(adapter.streamEvents, (event) => event.type === "user-input.resolved"),
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* adapter.startSession(startInput(threadId));
+        const opened = yield* Fiber.join(requested);
+        expect(opened._tag).toBe("Some");
+        yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("startup-dialog"), {
+          "startup-dialog": answer,
+        });
+        expect((yield* Fiber.join(resolved))._tag).toBe("Some");
+        yield* adapter.stopSession(threadId);
+        const response = readLog(logPath)
+          .filter((entry) => entry.kind === "command")
+          .map((entry) => entry.command)
+          .find((command) => command?.type === "extension_ui_response");
+        expect(response).toMatchObject({
+          type: "extension_ui_response",
+          id: "startup-dialog",
+          value: answer,
+        });
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("resolves a timed dialog once without racing a native response", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter({ startupDialog: "input", dialogTimeout: 1_000 });
+      const threadId = ThreadId.make("pi-timeout-dialog");
+      const dialogEvents = Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.threadId === threadId &&
+          (event.type === "user-input.requested" || event.type === "user-input.resolved"),
+      );
+      const events = yield* Stream.runCollect(Stream.take(dialogEvents, 2)).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      const requested = yield* Stream.runHead(
+        Stream.filter(adapter.streamEvents, (event) => event.type === "user-input.requested"),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* adapter.startSession(startInput(threadId));
+      yield* Fiber.join(requested);
+      yield* TestClock.adjust("1 second");
+      expect(Array.from(yield* Fiber.join(events)).map((event) => event.type)).toEqual([
+        "user-input.requested",
+        "user-input.resolved",
+      ]);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("clears pending dialogs when the Pi process exits", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter({ startupDialog: "editor", dialogCrash: true });
+      const threadId = ThreadId.make("pi-dialog-crash");
+      const terminal = yield* Stream.runCollect(
+        Stream.take(
+          Stream.filter(
+            adapter.streamEvents,
+            (event) =>
+              event.threadId === threadId &&
+              (event.type === "user-input.requested" ||
+                event.type === "user-input.resolved" ||
+                event.type === "runtime.error" ||
+                event.type === "session.exited"),
+          ),
+          4,
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* adapter.startSession(startInput(threadId));
+      expect(Array.from(yield* Fiber.join(terminal)).map((event) => event.type)).toEqual([
+        "user-input.requested",
+        "user-input.resolved",
+        "runtime.error",
+        "session.exited",
+      ]);
+      expect(yield* adapter.hasSession(threadId)).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("bounds fire-and-forget UI and deduplicates editor suggestions", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter({ uiEvents: true });
+      const threadId = ThreadId.make("pi-ui-events");
+      yield* adapter.startSession(startInput(threadId));
+      const warnings = yield* Stream.runCollect(
+        Stream.take(
+          Stream.filter(
+            adapter.streamEvents,
+            (event) => event.threadId === threadId && event.type === "runtime.warning",
+          ),
+          2,
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* adapter.sendTurn({ threadId, input: "ui-events" });
+      const events = Array.from(yield* Fiber.join(warnings));
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        type: "runtime.warning",
+        payload: { message: "Extension warning", detail: { severity: "error" } },
+      });
+      expect(events[1]).toMatchObject({
+        type: "runtime.warning",
+        payload: {
+          message: "A Pi extension suggested editor text.",
+          detail: { suggestion: "Suggested prompt" },
+        },
+      });
+      yield* adapter.interruptTurn(threadId);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("routes marked permission selects through canonical approvals", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const logPath = NodePath.join(config.stateDir, "pi-permission.log");
+      const adapter = yield* makeTestAdapter({ permissionTool: "bash", logPath });
+      const threadId = ThreadId.make("pi-permission");
+      yield* adapter.startSession(startInput(threadId, "approval-required"));
+      const opened = yield* Stream.runHead(
+        Stream.filter(adapter.streamEvents, (event) => event.type === "request.opened"),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      const resolved = yield* Stream.runHead(
+        Stream.filter(adapter.streamEvents, (event) => event.type === "request.resolved"),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* adapter.sendTurn({ threadId, input: "permission" });
+      const request = yield* Fiber.join(opened);
+      expect(request._tag).toBe("Some");
+      if (request._tag === "Some" && request.value.type === "request.opened") {
+        expect(request.value.payload).toMatchObject({
+          requestType: "command_execution_approval",
+          detail: "bash: test request",
+          args: { toolName: "bash", input: { command: "pnpm test" } },
+        });
+      }
+      yield* adapter.respondToRequest(
+        threadId,
+        ApprovalRequestId.make("permission-dialog"),
+        "acceptForSession",
+      );
+      expect((yield* Fiber.join(resolved))._tag).toBe("Some");
+      const log = readLog(logPath);
+      expect(log.find((entry) => entry.kind === "argv")?.argv).toEqual(
+        expect.arrayContaining([
+          "--extension",
+          expect.stringContaining("t3-pi-permission-gate-v1.mjs"),
+        ]),
+      );
+      yield* adapter.interruptTurn(threadId);
+      const completedLog = readLog(logPath);
+      expect(
+        completedLog.find(
+          (entry) => entry.kind === "command" && entry.command?.type === "extension_ui_response",
+        )?.command,
+      ).toMatchObject({ value: "Allow for this session" });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("maps permission decline and cancellation to native select responses", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      for (const [decision, expected] of [
+        ["decline", { value: "Deny" }],
+        ["cancel", { cancelled: true }],
+      ] as const) {
+        const logPath = NodePath.join(config.stateDir, `pi-permission-${decision}.log`);
+        const adapter = yield* makeTestAdapter({ permissionTool: "custom_tool", logPath });
+        const threadId = ThreadId.make(`pi-permission-${decision}`);
+        yield* adapter.startSession(startInput(threadId, "auto"));
+        const opened = yield* Stream.runHead(
+          Stream.filter(adapter.streamEvents, (event) => event.type === "request.opened"),
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* adapter.sendTurn({ threadId, input: "permission" });
+        yield* Fiber.join(opened);
+        yield* adapter.respondToRequest(
+          threadId,
+          ApprovalRequestId.make("permission-dialog"),
+          decision,
+        );
+        yield* adapter.interruptTurn(threadId);
+        expect(
+          readLog(logPath).find(
+            (entry) => entry.kind === "command" && entry.command?.type === "extension_ui_response",
+          )?.command,
+        ).toMatchObject(expected);
+      }
+    }).pipe(Effect.scoped),
   );
 
   it.effect("uses persistent and resumed launch arguments with exact model identity", () =>
@@ -170,6 +398,7 @@ nodeIt("PiAdapter", (it) => {
         ]),
       );
       expect(launches[0]?.argv).not.toContain("--no-session");
+      expect(launches[0]?.argv?.some((arg) => arg.includes("t3-pi-permission"))).toBe(false);
       expect(launches[1]?.argv).toEqual(
         expect.arrayContaining(["--session", "/mock/persistent-session.jsonl"]),
       );

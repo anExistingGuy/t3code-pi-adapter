@@ -144,6 +144,8 @@ export interface PiRpcRuntime {
   readonly sendExtensionUiResponse: (
     response: PiExtensionUiResponse,
   ) => Effect.Effect<void, PiRpcError>;
+  /** Forget a Pi-native timed dialog without writing a response after its timeout. */
+  readonly forgetExtensionUiRequest: (id: string) => Effect.Effect<void>;
   readonly events: Stream.Stream<PiRpcEvent>;
   readonly diagnostics: Stream.Stream<PiRpcDiagnostic>;
   readonly stderr: Effect.Effect<string>;
@@ -691,6 +693,13 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
       yield* write(response);
     });
 
+  const forgetExtensionUiRequest = (id: string) =>
+    Ref.update(extensionDialogs, (current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+
   const close = Effect.gen(function* () {
     const action = yield* Ref.modify(state, (current) => {
       if (current === "open") return ["start" as const, "closing" as const] as const;
@@ -732,6 +741,7 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
   const runtime: PiRpcRuntime = {
     send,
     sendExtensionUiResponse,
+    forgetExtensionUiRequest,
     events: Stream.fromPubSub(events),
     diagnostics: Stream.fromPubSub(diagnostics),
     stderr: currentStderr,

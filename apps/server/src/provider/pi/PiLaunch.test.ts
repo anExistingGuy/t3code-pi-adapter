@@ -41,6 +41,7 @@ describe("Pi launch policy", () => {
       launchArgs: "--verbose",
       cwd: "/workspace",
       env: { CUSTOM: "yes" },
+      extensionPaths: ["/t3/provider-assets/pi/permission.mjs"],
       session: { mode: "ephemeral" },
       model: { provider: "custom/provider", id: "model/id with spaces" },
       thinkingLevel: "xhigh",
@@ -54,6 +55,8 @@ describe("Pi launch policy", () => {
     });
     expect(spec.args).toEqual([
       "--verbose",
+      "--extension",
+      "/t3/provider-assets/pi/permission.mjs",
       "--mode",
       "rpc",
       "--no-session",

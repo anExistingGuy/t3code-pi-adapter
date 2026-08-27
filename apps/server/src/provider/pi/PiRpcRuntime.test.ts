@@ -218,6 +218,30 @@ nodeIt("PiRpcRuntime", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("forgets native timed dialogs without responding during close", () =>
+    Effect.gen(function* () {
+      const logs: PiRpcProtocolLogEvent[] = [];
+      const runtime = yield* makeRuntime({ logs });
+      const requestFiber = yield* Stream.runHead(runtime.events).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* runtime.prompt({ message: "dialog" });
+      yield* Fiber.join(requestFiber);
+      yield* runtime.forgetExtensionUiRequest("dialog-1");
+      yield* runtime.close;
+      expect(
+        logs.filter(
+          (entry) =>
+            entry.direction === "outgoing" &&
+            typeof entry.payload === "object" &&
+            entry.payload !== null &&
+            "type" in entry.payload &&
+            entry.payload.type === "extension_ui_response",
+        ),
+      ).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect(
     "lets an acquisition-time handler answer extension dialogs before subscribers run",
     () =>

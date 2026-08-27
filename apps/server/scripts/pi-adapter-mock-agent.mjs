@@ -3,7 +3,11 @@ import * as NodeProcess from "node:process";
 
 const process = NodeProcess.default;
 const logPath = process.env.PI_ADAPTER_MOCK_LOG;
-const startupDialog = process.env.PI_ADAPTER_MOCK_STARTUP_DIALOG === "1";
+const startupDialog = process.env.PI_ADAPTER_MOCK_STARTUP_DIALOG;
+const startupDialogTimeout = process.env.PI_ADAPTER_MOCK_DIALOG_TIMEOUT;
+const dialogCrash = process.env.PI_ADAPTER_MOCK_DIALOG_CRASH === "1";
+const permissionTool = process.env.PI_ADAPTER_MOCK_PERMISSION_TOOL;
+const emitUiEvents = process.env.PI_ADAPTER_MOCK_UI_EVENTS === "1";
 let input = "";
 let streaming = false;
 let pendingCount = 0;
@@ -185,13 +189,22 @@ function handle(command) {
       if (startupDialog && !startupDialogEmitted) {
         startupDialogEmitted = true;
         delayedState = command;
+        const method = startupDialog === "1" ? "confirm" : startupDialog;
         write({
           type: "extension_ui_request",
           id: "startup-dialog",
-          method: "confirm",
+          method,
           title: "Initialize?",
-          message: "Allow startup",
+          ...(method === "confirm" ? { message: "Allow startup" } : {}),
+          ...(method === "select" ? { options: ["Alpha", "Beta"] } : {}),
+          ...(method === "input" ? { placeholder: "Type a value" } : {}),
+          ...(method === "editor" ? { prefill: "Line 1\nLine 2" } : {}),
+          ...(startupDialogTimeout ? { timeout: Number(startupDialogTimeout) } : {}),
         });
+        if (dialogCrash) {
+          process.exitCode = 8;
+          process.stdin.destroy();
+        }
         return;
       }
       response(command, state());
@@ -250,6 +263,64 @@ function handle(command) {
       return;
     case "prompt":
       response(command);
+      if (command.message === "ui-events" && emitUiEvents) {
+        write({
+          type: "extension_ui_request",
+          id: "notify-1",
+          method: "notify",
+          message: "Extension warning",
+          notifyType: "error",
+        });
+        for (let index = 0; index < 2; index += 1) {
+          write({
+            type: "extension_ui_request",
+            id: `status-${index}`,
+            method: "setStatus",
+            statusKey: "mock",
+            statusText: "Ready",
+          });
+          write({
+            type: "extension_ui_request",
+            id: `widget-${index}`,
+            method: "setWidget",
+            widgetKey: "mock",
+            widgetLines: ["One", "Two"],
+          });
+          write({
+            type: "extension_ui_request",
+            id: `editor-${index}`,
+            method: "set_editor_text",
+            text: "Suggested prompt",
+          });
+        }
+        write({
+          type: "extension_ui_request",
+          id: "title-1",
+          method: "setTitle",
+          title: "Extension title",
+        });
+      }
+      if (command.message === "permission" && permissionTool) {
+        const marker = process.env.T3_PI_PERMISSION_MARKER;
+        const payload = Buffer.from(
+          JSON.stringify({
+            version: "t3-pi-permission-v1",
+            toolName: permissionTool,
+            toolCallId: "permission-tool-1",
+            cwd: process.cwd(),
+            input: permissionTool === "bash" ? { command: "pnpm test" } : { value: "test" },
+            summary: `${permissionTool}: test request`,
+          }),
+          "utf8",
+        ).toString("base64url");
+        write({
+          type: "extension_ui_request",
+          id: "permission-dialog",
+          method: "select",
+          title: `${marker}:${payload}`,
+          options: ["Allow once", "Allow for this session", "Deny"],
+        });
+      }
       if (command.message.startsWith("/instant")) return;
       if (command.message === "events") {
         emitCanonicalFixture();

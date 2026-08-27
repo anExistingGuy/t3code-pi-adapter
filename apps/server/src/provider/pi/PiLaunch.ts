@@ -79,6 +79,8 @@ export interface PiLaunchInput {
   readonly binaryArgs?: ReadonlyArray<string>;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  /** Adapter-owned extensions appended without replacing user-configured extensions. */
+  readonly extensionPaths?: ReadonlyArray<string>;
   readonly session: PiLaunchSession;
   readonly model?: {
     readonly provider: string;
@@ -101,7 +103,11 @@ export function buildPiLaunchSpec(input: PiLaunchInput): PiLaunchSpec {
     throw new PiLaunchArgumentError({ detail: issue });
   }
 
-  const args = [...(input.binaryArgs ?? []), ...tokenizeCliArgs(input.launchArgs), "--mode", "rpc"];
+  const args = [...(input.binaryArgs ?? []), ...tokenizeCliArgs(input.launchArgs)];
+  for (const extensionPath of input.extensionPaths ?? []) {
+    args.push("--extension", extensionPath);
+  }
+  args.push("--mode", "rpc");
   if (input.session.mode === "ephemeral") {
     args.push("--no-session");
   } else if (input.session.mode === "resume") {
