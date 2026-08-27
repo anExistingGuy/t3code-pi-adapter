@@ -38,6 +38,7 @@ import {
 } from "./PiRpcProtocol.ts";
 
 const DEFAULT_STDERR_BYTES = 64 * 1024;
+const RPC_BUFFER_CAPACITY = 1_024;
 
 export class PiRpcProtocolError extends Schema.TaggedErrorClass<PiRpcProtocolError>()(
   "PiRpcProtocolError",
@@ -256,9 +257,9 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
         }),
     ),
   );
-  const input = yield* Queue.unbounded<Uint8Array, Done>();
-  const events = yield* PubSub.unbounded<PiRpcEvent>();
-  const diagnostics = yield* PubSub.unbounded<PiRpcDiagnostic>();
+  const input = yield* Queue.bounded<Uint8Array, Done>(RPC_BUFFER_CAPACITY);
+  const events = yield* PubSub.bounded<PiRpcEvent>(RPC_BUFFER_CAPACITY);
+  const diagnostics = yield* PubSub.bounded<PiRpcDiagnostic>(RPC_BUFFER_CAPACITY);
   const pending = yield* Ref.make(new Map<string, Pending>());
   const extensionDialogs = yield* Ref.make(new Set<string>());
   const answeredDialogs = yield* Ref.make(new Set<string>());
@@ -569,14 +570,32 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
     ),
     Effect.catchCause((cause) =>
       Effect.gen(function* () {
+        yield* Fiber.join(stdoutFiber).pipe(Effect.ignore);
+        yield* Fiber.join(stderrFiber).pipe(Effect.ignore);
+        const runtimeState = yield* Ref.get(state);
         const stderr = yield* currentStderr;
-        yield* rejectPending(
-          new PiRpcProcessError({
-            detail: "Failed while waiting for the Pi RPC process to exit.",
-            stderr,
-            cause,
-          }),
-        );
+        yield* Deferred.succeed(exit, {
+          exitCode: undefined,
+          expected: runtimeState !== "open",
+          stderr,
+        });
+        if (runtimeState === "open") {
+          yield* rejectPending(
+            new PiRpcProcessError({
+              detail: "Failed while waiting for the Pi RPC process to exit.",
+              stderr,
+              cause,
+            }),
+          );
+        }
+        if (runtimeState !== "closing") {
+          yield* Ref.set(state, "closed");
+        }
+        yield* PubSub.shutdown(events);
+        yield* PubSub.shutdown(diagnostics);
+        if (runtimeState !== "closing") {
+          yield* Deferred.succeed(closeDone, undefined);
+        }
       }),
     ),
     Effect.forkIn(scope),
@@ -734,7 +753,7 @@ export const makePiRpcRuntime = Effect.fn("makePiRpcRuntime")(function* (
     yield* PubSub.shutdown(events);
     yield* PubSub.shutdown(diagnostics);
     yield* Deferred.succeed(closeDone, undefined);
-  }).pipe(Effect.uninterruptible);
+  });
 
   yield* Effect.addFinalizer(() => close.pipe(Effect.ignore));
 

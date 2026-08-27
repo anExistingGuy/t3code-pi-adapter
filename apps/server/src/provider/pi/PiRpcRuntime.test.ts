@@ -316,7 +316,7 @@ nodeIt("PiRpcRuntime", (it) => {
       const metadata = yield* runtime.exit;
       expect(metadata.expected).toBe(true);
       yield* runtime.close;
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.scoped, TestClock.withLive),
   );
 
   it.effect("terminates only its owned process when graceful stdin closure is ignored", () =>

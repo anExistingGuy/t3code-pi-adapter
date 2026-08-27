@@ -90,6 +90,7 @@ import {
 } from "../pi/PiRuntimeEvents.ts";
 
 const PI_RESUME_VERSION = 1 as const;
+const RUNTIME_EVENT_BUFFER_CAPACITY = 1_024;
 const isPiThinkingLevel = Schema.is(PiThinkingLevel);
 const isProviderAdapterError = Schema.is(
   Schema.Union([
@@ -310,7 +311,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
   const makeNativeLoggers = yield* makePiNativeLoggerFactory();
   const sessions = new Map<ThreadId, PiSessionContext>();
   const threadLocks = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
-  const runtimeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  const runtimeEvents = yield* PubSub.bounded<ProviderRuntimeEvent>(RUNTIME_EVENT_BUFFER_CAPACITY);
   let nextProcessGeneration = 0;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
