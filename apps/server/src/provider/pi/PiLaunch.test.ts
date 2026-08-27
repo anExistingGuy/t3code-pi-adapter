@@ -45,6 +45,7 @@ describe("Pi launch policy", () => {
       session: { mode: "ephemeral" },
       model: { provider: "custom/provider", id: "model/id with spaces" },
       thinkingLevel: "xhigh",
+      disableTools: true,
       sessionName: " T3 session ",
     });
 
@@ -59,6 +60,7 @@ describe("Pi launch policy", () => {
       "/t3/provider-assets/pi/permission.mjs",
       "--mode",
       "rpc",
+      "--no-tools",
       "--no-session",
       "--provider",
       "custom/provider",

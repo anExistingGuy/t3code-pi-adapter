@@ -1,3 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -10,13 +16,23 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import { createModelSelection } from "@t3tools/shared/model";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "../Layers/ProviderInstanceRegistryLive.ts";
+import type { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
+import { encodePiModelSlug } from "../pi/PiModelCatalog.ts";
+import { makeTextGenerationFromRegistry } from "../../textGeneration/TextGeneration.ts";
 import { PiDriver, resolvePiInstanceEnvironment, validatePiLaunchArgs } from "./PiDriver.ts";
+
+const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const textGenerationMockPath = NodePath.join(
+  __dirname,
+  "../../../scripts/pi-text-generation-mock-agent.mjs",
+);
 
 const defaultConfig: PiSettings = {
   enabled: false,
@@ -134,6 +150,52 @@ driverIt("PiDriver managed registration", (it) => {
         `${PI_DRIVER_KIND}:instance:${instanceId}`,
       );
       expect(yield* instance.adapter.listSessions()).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("returns Pi text generation and registry routing uses the requested instance", () =>
+    Effect.gen(function* () {
+      const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "pi-driver-text-"));
+      const wrapperPath = NodePath.join(tempDir, "pi-text-mock");
+      NodeFS.writeFileSync(
+        wrapperPath,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(textGenerationMockPath)} "$@"\n`,
+        "utf8",
+      );
+      NodeFS.chmodSync(wrapperPath, 0o755);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true })),
+      );
+
+      const instanceId = ProviderInstanceId.make("pi_text_routed");
+      const instance = yield* PiDriver.create({
+        instanceId,
+        displayName: "Pi Text",
+        environment: [
+          {
+            name: "PI_TEXT_MOCK_OUTPUT",
+            value: '{"title":"Driver-routed Pi title"}',
+            sensitive: false,
+          },
+        ],
+        enabled: false,
+        config: { ...defaultConfig, binaryPath: wrapperPath },
+      });
+      const registry = {
+        getInstance: (requested: ProviderInstanceId) =>
+          Effect.succeed(requested === instanceId ? instance : undefined),
+      } as ProviderInstanceRegistry["Service"];
+      const service = makeTextGenerationFromRegistry(registry);
+      const result = yield* service.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "prove Pi routing",
+        modelSelection: createModelSelection(
+          instanceId,
+          encodePiModelSlug({ provider: "custom-driver", modelId: "title-model" }),
+        ),
+      });
+
+      expect(result.title).toBe("Driver-routed Pi title");
     }).pipe(Effect.scoped),
   );
 

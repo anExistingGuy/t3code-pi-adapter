@@ -87,6 +87,8 @@ export interface PiLaunchInput {
     readonly id: string;
   };
   readonly thinkingLevel?: string;
+  /** Disable every built-in, extension, and custom tool for utility processes. */
+  readonly disableTools?: boolean;
   readonly sessionName?: string;
 }
 
@@ -108,6 +110,9 @@ export function buildPiLaunchSpec(input: PiLaunchInput): PiLaunchSpec {
     args.push("--extension", extensionPath);
   }
   args.push("--mode", "rpc");
+  if (input.disableTools) {
+    args.push("--no-tools");
+  }
   if (input.session.mode === "ephemeral") {
     args.push("--no-session");
   } else if (input.session.mode === "resume") {

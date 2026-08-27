@@ -156,7 +156,11 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
           settings: effectiveConfig,
           ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         }),
-        textGeneration: makePiTextGeneration(),
+        textGeneration: yield* makePiTextGeneration({
+          instanceId,
+          settings: effectiveConfig,
+          environment: processEnv,
+        }),
       } satisfies ProviderInstance;
     }),
 };
