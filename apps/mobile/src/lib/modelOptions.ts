@@ -15,6 +15,7 @@ export type ModelOption = {
   readonly providerKey: string;
   readonly providerLabel: string;
   readonly providerDriver: string;
+  readonly subProvider?: string | undefined;
   readonly isDefault: boolean;
   readonly isLegacy: boolean;
   readonly capabilities: ModelCapabilities | null;
@@ -27,6 +28,27 @@ export type ProviderGroup = {
   readonly models: ReadonlyArray<ModelOption>;
 };
 
+export type ModelSubProviderGroup = {
+  readonly label: string | null;
+  readonly models: ReadonlyArray<ModelOption>;
+};
+
+export function groupModelsBySubProvider(
+  models: ReadonlyArray<ModelOption>,
+): ReadonlyArray<ModelSubProviderGroup> {
+  const groups: Array<{ label: string | null; models: ModelOption[] }> = [];
+  for (const model of models) {
+    const label = model.subProvider ?? null;
+    const current = groups.at(-1);
+    if (current?.label === label) {
+      current.models.push(model);
+    } else {
+      groups.push({ label, models: [model] });
+    }
+  }
+  return groups;
+}
+
 function providerDisplayLabel(provider: {
   readonly displayName?: string | undefined;
   readonly driver: string;
@@ -35,6 +57,10 @@ function providerDisplayLabel(provider: {
   if (provider.displayName) return provider.displayName;
   if (provider.driver === "codex") return "Codex";
   if (provider.driver === "claudeAgent") return "Claude";
+  if (provider.driver === "cursor") return "Cursor";
+  if (provider.driver === "grok") return "Grok";
+  if (provider.driver === "opencode") return "OpenCode";
+  if (provider.driver === "piAgent") return "Pi";
   return provider.instanceId;
 }
 
@@ -125,6 +151,7 @@ export function buildModelOptions(
         providerKey: provider.instanceId,
         providerLabel,
         providerDriver: provider.driver,
+        ...(model.subProvider ? { subProvider: model.subProvider } : {}),
         isDefault: model.isDefault === true,
         isLegacy: model.isLegacy === true,
         capabilities: model.capabilities,

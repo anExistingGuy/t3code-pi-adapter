@@ -19,6 +19,27 @@ const effortDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> = 
 };
 
 describe("selectableChoices", () => {
+  it("preserves every Pi thinking level including off and max", () => {
+    const thinkingLevel = {
+      id: "thinkingLevel",
+      label: "Thinking level",
+      type: "select" as const,
+      options: ["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((id) => ({
+        id,
+        label: id === "xhigh" ? "Extra high" : id.charAt(0).toUpperCase() + id.slice(1),
+      })),
+    };
+
+    expect(selectableChoices(thinkingLevel).map((choice) => choice.id)).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
   it("hides prompt-injected and workflow-trigger choices, keeping declared order", () => {
     expect(selectableChoices(effortDescriptor).map((choice) => choice.id)).toEqual([
       "low",

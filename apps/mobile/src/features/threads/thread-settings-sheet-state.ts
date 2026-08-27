@@ -15,6 +15,7 @@ export function modelMatchesCatalogQuery(input: {
     input.model.label,
     input.model.subtitle,
     input.model.selection.model,
+    input.model.subProvider ?? "",
     input.providerLabel,
   ].some((value) => value.toLocaleLowerCase().includes(query));
 }

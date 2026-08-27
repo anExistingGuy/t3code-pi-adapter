@@ -37,7 +37,11 @@ import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { cn } from "../../lib/cn";
-import type { ModelOption, ProviderGroup } from "../../lib/modelOptions";
+import {
+  groupModelsBySubProvider,
+  type ModelOption,
+  type ProviderGroup,
+} from "../../lib/modelOptions";
 import { applyProviderOptionSelection } from "../../lib/providerOptions";
 import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
 import { useThemeColor } from "../../lib/useThemeColor";
@@ -522,6 +526,11 @@ type ThreadSettingsCatalogItem =
       readonly provider: ThreadSettingsProviderCatalog;
     }
   | {
+      readonly kind: "subprovider";
+      readonly key: string;
+      readonly label: string;
+    }
+  | {
       readonly kind: "model";
       readonly key: string;
       readonly option: ModelOption;
@@ -536,6 +545,40 @@ type ThreadSettingsCatalogItem =
       readonly kind: "options";
       readonly key: "options";
     };
+
+function SubProviderHeader(props: { readonly label: string }) {
+  return (
+    <View accessibilityRole="header" className="mx-4 px-5 pb-1 pt-3">
+      <Text className="text-3xs font-t3-bold uppercase tracking-[0.8px] text-foreground-muted">
+        {props.label}
+      </Text>
+    </View>
+  );
+}
+
+function buildProviderModelCatalogItems(
+  providerKey: string,
+  models: ReadonlyArray<ModelOption>,
+): ReadonlyArray<ThreadSettingsCatalogItem> {
+  return groupModelsBySubProvider(models).flatMap((group, groupIndex) => [
+    ...(group.label
+      ? [
+          {
+            kind: "subprovider" as const,
+            key: `subprovider:${providerKey}:${group.label}:${groupIndex}`,
+            label: group.label,
+          },
+        ]
+      : []),
+    ...group.models.map((option, index) => ({
+      kind: "model" as const,
+      key: `model:${option.key}`,
+      option,
+      isFirst: index === 0,
+      isLast: index === group.models.length - 1,
+    })),
+  ]);
+}
 
 function ThreadSettingsModelListRow(props: {
   readonly option: ModelOption;
@@ -630,13 +673,7 @@ function useThreadSettingsCatalogItems(
             key: `provider:${group.providerKey}`,
             provider,
           },
-          ...provider.models.map((option, index) => ({
-            kind: "model" as const,
-            key: `model:${option.key}`,
-            option,
-            isFirst: index === 0,
-            isLast: index === provider.models.length - 1,
-          })),
+          ...buildProviderModelCatalogItems(group.providerKey, provider.models),
         ];
       }),
     [
@@ -761,6 +798,8 @@ function ThreadSettingsMainContent(props: {
 
       if (item.kind === "provider") {
         content = <ThreadSettingsProviderListHeader provider={item.provider} />;
+      } else if (item.kind === "subprovider") {
+        content = <SubProviderHeader label={item.label} />;
       } else if (item.kind === "model") {
         content = (
           <ThreadSettingsModelListRow

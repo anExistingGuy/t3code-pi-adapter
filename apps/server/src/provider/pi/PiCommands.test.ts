@@ -76,6 +76,17 @@ describe("Pi command discovery", () => {
     ]);
   });
 
+  it("keeps unknown future command sources as generic slash commands", () => {
+    expect(
+      mapPiCommands([
+        { name: "future-command", description: "From a future Pi source", source: "package" },
+      ]),
+    ).toEqual({
+      slashCommands: [{ name: "future-command", description: "From a future Pi source" }],
+      skills: [],
+    });
+  });
+
   it("keeps the first exact invocation name and omits skills without source paths", () => {
     const mapped = mapPiCommands([
       { name: "same", description: "first", source: "prompt" },

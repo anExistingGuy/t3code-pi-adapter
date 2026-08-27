@@ -53,6 +53,15 @@ describe("PiRpcProtocol", () => {
     }),
   );
 
+  it.effect("keeps future command sources available for generic client fallback", () =>
+    Effect.gen(function* () {
+      const commands = yield* decodePiRpcResponseData("get_commands", {
+        commands: [{ name: "future", source: "package" }],
+      });
+      expect(commands.commands).toEqual([{ name: "future", source: "package" }]);
+    }),
+  );
+
   it.effect("decodes tool-call starts and typed extension messages", () =>
     Effect.gen(function* () {
       const toolStart = yield* decodePiRpcKnownEvent({

@@ -5,6 +5,7 @@ import { ProviderInstanceId, type ServerConfig } from "@t3tools/contracts";
 import {
   buildModelOptions,
   groupByProvider,
+  groupModelsBySubProvider,
   resolveDefaultableModelSelection,
   resolveSelectableModelSelection,
 } from "./modelOptions";
@@ -48,6 +49,42 @@ describe("mobile model options", () => {
           { key: "codex:gpt-5.4", label: "GPT-5.4", isLegacy: true },
         ],
       },
+    ]);
+  });
+
+  it("labels Pi and preserves its discovered sub-provider grouping", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "piAgent",
+          driver: "piAgent",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "provider-a/model-a",
+              name: "Model A",
+              subProvider: "Provider A",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    const options = buildModelOptions(config, null);
+    expect(options).toMatchObject([
+      {
+        providerLabel: "Pi",
+        providerDriver: "piAgent",
+        subProvider: "Provider A",
+        label: "Model A",
+      },
+    ]);
+    expect(groupModelsBySubProvider(options)).toMatchObject([
+      { label: "Provider A", models: [{ label: "Model A" }] },
     ]);
   });
 

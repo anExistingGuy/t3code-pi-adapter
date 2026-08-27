@@ -7,7 +7,7 @@ orchestration layer does not know which one is behind a thread.
 
 ## Built-in drivers
 
-[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with five entries:
+[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with six entries:
 
 | Driver kind   | Driver source                           |
 | ------------- | --------------------------------------- |
@@ -16,6 +16,7 @@ orchestration layer does not know which one is behind a thread.
 | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]     |
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
+| `piAgent`     | [`Drivers/PiDriver.ts`][pi]             |
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
@@ -38,6 +39,25 @@ directory to route session and turn operations for a thread, so callers name a t
 
 Adding a driver means writing the driver plus adapter and adding it to `BUILT_IN_DRIVERS`. No
 orchestration, contract, or client change is required for the common case.
+
+### Pi RPC boundary
+
+Pi is launched as a scoped child process in RPC mode. [`PiRpcRuntime.ts`][pi-runtime] owns strict
+line-delimited JSON framing, request correlation, extension dialogs, bounded diagnostics, and child
+cleanup. The adapter treats stdout as protocol data rather than terminal output and validates every
+record before use. Unknown future events are logged and ignored.
+
+Pi provides its model and resource catalog dynamically. Model identity is the exact pair of Pi
+provider ID and model ID; T3 encodes that pair into a lossless model slug for routing while clients
+show the provider and friendly model name separately. The server snapshot carries models, option
+descriptors, slash commands, and skills to every client, so browsers and mobile devices never query
+Pi directly.
+
+A Pi session cursor identifies the Pi-owned session file, session ID, and current branch entries.
+Resume, rollback, and branch changes use RPC operations instead of editing session JSONL. Runtime
+events are associated with the current process generation and turn, and a turn settles only on
+Pi's `agent_settled` event. Earlier end events update content and status but are not authoritative
+turn completion.
 
 ## How provider work is requested
 
@@ -81,6 +101,8 @@ when a request opens (approval) or user input is requested, via
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
+[pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
+[pi-runtime]: ../../apps/server/src/provider/pi/PiRpcRuntime.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
 [registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts

@@ -1,5 +1,6 @@
 import { Path, Svg } from "react-native-svg";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
+import { resolveProviderIconKind } from "./providerIconKind";
 
 type ProviderIconProps = {
   readonly provider: string | null | undefined;
@@ -11,8 +12,9 @@ export function ProviderIcon(props: ProviderIconProps) {
   const isDarkMode = themeAppearance === "dark";
   const size = props.size ?? 16;
   const mono = isDarkMode ? "#e5e5e5" : "#171717";
+  const iconKind = resolveProviderIconKind(props.provider);
 
-  if (props.provider === "claudeAgent") {
+  if (iconKind === "claude") {
     return (
       <Svg width={size} height={size} viewBox="0 0 256 257" fill="none">
         <Path
@@ -23,7 +25,7 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
-  if (props.provider === "grok") {
+  if (iconKind === "grok") {
     const fill = isDarkMode ? "#F5F5F5" : "#0F0F0F";
     return (
       <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -39,7 +41,7 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
-  if (props.provider === "cursor") {
+  if (iconKind === "cursor") {
     return (
       <Svg width={size} height={size} viewBox="0 0 466.73 532.09" fill="none">
         <Path
@@ -50,7 +52,24 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
-  if (props.provider === "opencode") {
+  if (iconKind === "pi") {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 800 800" fill="none">
+        <Path
+          fill={mono}
+          d="M160 0h480c88.366 0 160 71.634 160 160v480c0 88.366-71.634 160-160 160H160C71.634 800 0 728.366 0 640V160C0 71.634 71.634 0 160 0Z"
+        />
+        <Path
+          fill={isDarkMode ? "#171717" : "#fff"}
+          fillRule="evenodd"
+          d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
+        />
+        <Path fill={isDarkMode ? "#171717" : "#fff"} d="M517.36 400H634.72V634.72H517.36Z" />
+      </Svg>
+    );
+  }
+
+  if (iconKind === "opencode") {
     return (
       <Svg width={size} height={size} viewBox="0 0 32 40" fill="none">
         <Path d="M24 32H8V16H24V32Z" fill={isDarkMode ? "#4B4646" : "#CFCECD"} />
@@ -59,7 +78,7 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
-  // codex (and unknown drivers)
+  // Codex and unknown drivers use the generic monochrome provider mark.
   return (
     <Svg width={size} height={size} viewBox="0 0 256 260" fill="none">
       <Path

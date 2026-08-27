@@ -22,6 +22,17 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it("registers Pi with its schema-driven host settings", () => {
+    const pi = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("piAgent")];
+
+    expect(pi).toMatchObject({ label: "Pi", badgeLabel: "Early Access" });
+    expect(deriveProviderSettingsFields(pi!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "agentDir",
+      "launchArgs",
+    ]);
+  });
+
   it("sources labels and descriptions from schema annotations", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();

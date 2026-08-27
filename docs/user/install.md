@@ -54,16 +54,20 @@ yay -S t3code-nightly-bin
 T3 Code drives provider CLIs; it does not ship them. Install the CLI for each provider you want
 to use, then authenticate it.
 
-| Provider   | CLI                                                   | Default binary | Log in with           |
-| ---------- | ----------------------------------------------------- | -------------- | --------------------- |
-| Codex      | [Codex CLI](https://developers.openai.com/codex/cli)  | `codex`        | `codex login`         |
-| Claude     | [Claude Code](https://claude.com/product/claude-code) | `claude`       | `claude auth login`   |
-| Cursor     | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
-| Grok Build | [Grok Build CLI](https://x.ai/cli)                    | `grok`         | `grok login`          |
-| OpenCode   | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
+| Provider   | CLI                                                    | Default binary | Log in with                            |
+| ---------- | ------------------------------------------------------ | -------------- | -------------------------------------- |
+| Codex      | [Codex CLI](https://developers.openai.com/codex/cli)   | `codex`        | `codex login`                          |
+| Claude     | [Claude Code](https://claude.com/product/claude-code)  | `claude`       | `claude auth login`                    |
+| Cursor     | [Cursor CLI](https://cursor.com/cli)                   | `cursor-agent` | `agent login`                          |
+| Grok Build | [Grok Build CLI](https://x.ai/cli)                     | `grok`         | `grok login`                           |
+| OpenCode   | [OpenCode](https://opencode.ai)                        | `opencode`     | `opencode auth login`                  |
+| Pi         | [Pi coding agent](https://github.com/badlogic/pi-mono) | `pi`           | Run `pi` and use its login/config flow |
 
-Codex and Claude are on by default. Cursor, Grok Build, and OpenCode are off by default; turn
-them on in **Settings** → the provider's card when you want to use them.
+Codex and Claude are on by default. Cursor, Grok Build, OpenCode, and Pi are off by default; turn
+them on in **Settings** → the provider's card when you want to use them. Pi uses the same profile,
+models, providers, extensions, prompts, and skills as the `pi` command. Authentication can come
+from Pi's login/config flow or from environment variables and API keys supported by the selected
+Pi provider.
 
 Cursor is the one to watch: install Cursor CLI, which provides the `cursor-agent` binary that
 T3 Code looks for, but authenticate with `agent login`, not `cursor-agent login`.
@@ -85,7 +89,8 @@ T3 Code. You can install T3 Code, open it, and add providers afterwards. A provi
 authenticated shows its status in **Settings** and fails at session start with the login command
 to run.
 
-For multi-account setups, see [Codex](./providers-codex.md) and [Claude](./providers-claude.md).
+For multi-account setups, see [Codex](./providers-codex.md), [Claude](./providers-claude.md), and
+[Pi](./providers-pi.md).
 
 ## Next Steps
 

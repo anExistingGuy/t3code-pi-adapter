@@ -21,7 +21,8 @@ permission mode, and providers without an equivalent (such as OpenCode) fall bac
 Supervised.
 
 **Full access**: allow commands and edits without prompts. The default. The agent runs
-unattended until it finishes or asks a question of its own.
+unattended until it finishes or asks a question of its own. Pi runs with its native unrestricted
+tool behavior in this mode.
 
 Approvals appear inline in the conversation. Approve or reject one and the agent continues from
 there.
@@ -40,8 +41,13 @@ shell commands.
 
 Each provider maps these modes onto its own approval and sandbox settings. Codex, for example,
 translates the mode into its approval policy and sandbox level, so **Supervised** runs the CLI
-with prompting enabled and a restricted workspace while **Full access** disables both. The
-labels above describe what you get; the exact per-provider translation is internal and may
-change.
+with prompting enabled and a restricted workspace while **Full access** disables both.
 
-Mobile offers the same four modes with the same labels and descriptions.
+For Pi, **Supervised** asks for every tool call except recognized reads. **Auto-accept edits** also
+allows recognized edit, write, and patch tools. Pi has no separate native equivalent for **Auto**,
+so it falls back to **Supervised**. **Full access** adds no T3 tool gate. These controls apply to Pi
+tool calls, not to extension code itself: installed Pi extensions are trusted server-side code, and
+T3 does not provide an operating-system sandbox for them.
+
+The labels above describe what you get; the exact per-provider translation is internal and may
+change. Mobile offers the same four modes with the same labels and descriptions.

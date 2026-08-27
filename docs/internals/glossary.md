@@ -94,7 +94,13 @@ The live backend agent implementation and its event stream. The main service is 
 
 #### Provider
 
-The backend agent runtime that actually performs work. Five drivers ship built in: Codex, Claude, Cursor, Grok, and OpenCode. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17] as a representative adapter.
+The backend agent runtime that actually performs work. Six drivers ship built in: Codex, Claude, Cursor, Grok, OpenCode, and Pi. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17] as a representative adapter.
+
+#### Composite model identity
+
+A lossless routing identity used when a provider needs more than one value to identify a model. Pi
+models are identified by the exact Pi provider ID plus model ID; T3 encodes both in the model slug
+while clients display the provider grouping and friendly model name.
 
 #### Session
 

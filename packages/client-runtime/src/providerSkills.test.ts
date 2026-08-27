@@ -2,8 +2,17 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   formatProviderSkillDisplayName,
+  formatProviderSkillInsertion,
+  formatProviderSlashCommandInsertion,
   resolveProviderSkillSourceKind,
 } from "./providerSkills.ts";
+
+describe("provider composer insertion", () => {
+  it("preserves exact slash command names and Pi skill syntax", () => {
+    expect(formatProviderSlashCommandInsertion("extension:deploy")).toBe("/extension:deploy");
+    expect(formatProviderSkillInsertion("review-follow-up")).toBe("$review-follow-up ");
+  });
+});
 
 describe("formatProviderSkillDisplayName", () => {
   it("prefers the provider display name", () => {
@@ -71,6 +80,12 @@ describe("resolveProviderSkillSourceKind", () => {
     expect(
       resolveProviderSkillSourceKind({
         path: "/opt/skills/team-review/SKILL.md",
+      }),
+    ).toBe("other");
+    expect(
+      resolveProviderSkillSourceKind({
+        path: "/tmp/pi-skill/SKILL.md",
+        scope: "temporary",
       }),
     ).toBe("other");
   });

@@ -335,8 +335,8 @@ export const PiSessionTreeNode: Schema.Schema<PiSessionTreeNode> = Schema.suspen
 export const PiSourceInfo = Schema.Struct({
   path: Schema.String,
   source: Schema.String,
-  scope: Schema.Literals(["user", "project", "temporary"]),
-  origin: Schema.Literals(["package", "top-level"]),
+  scope: Schema.String,
+  origin: Schema.String,
   baseDir: Schema.optional(Schema.String),
 });
 export type PiSourceInfo = typeof PiSourceInfo.Type;
@@ -344,7 +344,7 @@ export type PiSourceInfo = typeof PiSourceInfo.Type;
 export const PiSlashCommand = Schema.Struct({
   name: Schema.String,
   description: Schema.optional(Schema.String),
-  source: Schema.Literals(["extension", "prompt", "skill"]),
+  source: Schema.String,
   sourceInfo: Schema.optional(PiSourceInfo),
   // Kept for compatibility with older Pi RPC payloads.
   location: Schema.optional(Schema.String),

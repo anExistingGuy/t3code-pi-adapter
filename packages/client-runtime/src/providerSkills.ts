@@ -15,6 +15,14 @@ function normalizePathSeparators(pathValue: string): string {
   return pathValue.replaceAll("\\", "/");
 }
 
+export function formatProviderSlashCommandInsertion(name: string): string {
+  return `/${name}`;
+}
+
+export function formatProviderSkillInsertion(name: string): string {
+  return `$${name} `;
+}
+
 export function formatProviderSkillDisplayName(
   skill: Pick<ServerProviderSkill, "name" | "displayName">,
 ): string {

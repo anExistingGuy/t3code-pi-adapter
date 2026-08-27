@@ -1,3 +1,7 @@
+import {
+  formatProviderSkillInsertion,
+  formatProviderSlashCommandInsertion,
+} from "@t3tools/client-runtime/providerSkills";
 import type {
   EnvironmentId,
   MessageId,
@@ -596,11 +600,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       if (item.type === "path") {
         replacement = `${serializeComposerFileLink(item.path)} `;
       } else if (item.type === "skill") {
-        replacement = `$${item.skill.name} `;
+        replacement = formatProviderSkillInsertion(item.skill.name);
       } else if (item.type === "slash-command") {
         replacement = `/${item.command} `;
       } else if (item.type === "provider-slash-command") {
-        replacement = `/${item.command.name} `;
+        replacement = formatProviderSlashCommandInsertion(item.command.name);
       }
 
       const result = replaceTextRange(
