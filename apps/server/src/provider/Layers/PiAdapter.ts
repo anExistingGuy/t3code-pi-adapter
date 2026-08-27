@@ -57,6 +57,7 @@ import {
   type PiExtensionUiResponse,
   type PiImageContent,
   type PiRpcKnownEvent,
+  type PiSessionEntry,
   type PiThinkingLevel as PiThinkingLevelValue,
 } from "../pi/PiRpcProtocol.ts";
 import {
@@ -100,14 +101,14 @@ const isProviderAdapterError = Schema.is(
   ]),
 );
 
-const PiResumeCursor = Schema.Struct({
+export const PiResumeCursor = Schema.Struct({
   schemaVersion: Schema.Literal(PI_RESUME_VERSION),
   sessionFile: Schema.NonEmptyString,
   sessionId: Schema.NonEmptyString,
-  leafId: Schema.NullOr(Schema.NonEmptyString),
+  leafId: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+  lastEntryId: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 });
-type PiResumeCursor = typeof PiResumeCursor.Type;
-const isPiResumeCursor = Schema.is(PiResumeCursor);
+export type PiResumeCursor = typeof PiResumeCursor.Type;
 
 interface PiPermissionRequestPayload {
   readonly version: typeof PI_PERMISSION_PROTOCOL_VERSION;
@@ -136,8 +137,15 @@ interface PiPendingDialog {
   timer: Fiber.Fiber<void, never> | undefined;
 }
 
+interface PiTurnSnapshot {
+  readonly id: TurnId;
+  readonly items: Array<unknown>;
+  readonly userEntryIds: Array<string>;
+}
+
 interface PiSessionContext {
   readonly threadId: ThreadId;
+  readonly processGeneration: number;
   readonly instanceId: ProviderInstanceId;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
@@ -149,7 +157,7 @@ interface PiSessionContext {
   readonly extensionWidgets: Map<string, string>;
   extensionTitle: string | undefined;
   editorSuggestion: string | undefined;
-  turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  turns: Array<PiTurnSnapshot>;
   activeTurnId: TurnId | undefined;
   generation: number;
   activeGeneration: number | undefined;
@@ -162,8 +170,9 @@ interface PiSessionContext {
   sessionFile: string | undefined;
   sessionId: string | undefined;
   leafId: string | null;
+  lastEntryId: string | null;
   extensionCommands: Set<string>;
-  readonly translation: PiRuntimeTranslationState;
+  translation: PiRuntimeTranslationState;
   readonly warnedUnknownEventTypes: Set<string>;
   currentContextWindow: number | undefined;
   stopped: boolean;
@@ -179,8 +188,12 @@ export interface PiAdapterLiveOptions {
   readonly binaryArgs?: ReadonlyArray<string>;
 }
 
-function parsePiResumeCursor(raw: unknown): PiResumeCursor | undefined {
-  return isPiResumeCursor(raw) ? raw : undefined;
+function userEntry(entry: PiSessionEntry): boolean {
+  return entry.type === "message" && entry.message?.role === "user";
+}
+
+function boundedPromptSummary(text: string): string {
+  return text.length <= 4_096 ? text : `${text.slice(0, 4_096)}…`;
 }
 
 function rewriteLeadingSkill(input: string): string {
@@ -298,6 +311,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
   const sessions = new Map<ThreadId, PiSessionContext>();
   const threadLocks = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
   const runtimeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  let nextProcessGeneration = 0;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const nextEventId = crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -352,6 +366,15 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
   const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
     Effect.flatMap(getThreadLock(threadId), (lock) => lock.withPermit(effect));
 
+  const isCurrentProcess = (context: PiSessionContext) => {
+    const current = sessions.get(context.threadId);
+    return (
+      !context.stopped &&
+      current !== undefined &&
+      current.processGeneration === context.processGeneration
+    );
+  };
+
   const requireSession = (
     threadId: ThreadId,
   ): Effect.Effect<PiSessionContext, ProviderAdapterSessionNotFoundError> => {
@@ -370,8 +393,143 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           sessionFile: context.sessionFile,
           sessionId: context.sessionId,
           leafId: context.leafId,
+          lastEntryId: context.lastEntryId,
         }
       : undefined;
+
+  const snapshotThread = (context: PiSessionContext) => ({
+    threadId: context.threadId,
+    turns: context.turns.map((turn) => ({ id: turn.id, items: [...turn.items] })),
+  });
+
+  const updateSessionCursor = Effect.fn("PiAdapter.updateSessionCursor")(function* (
+    context: PiSessionContext,
+  ) {
+    context.session = {
+      ...context.session,
+      ...(resumeCursor(context) ? { resumeCursor: resumeCursor(context) } : {}),
+      updatedAt: yield* nowIso,
+    };
+  });
+
+  const emitSessionConfigured = Effect.fn("PiAdapter.emitSessionConfigured")(function* (
+    context: PiSessionContext,
+    reason: string,
+  ) {
+    const cursor = resumeCursor(context);
+    yield* offer({
+      type: "session.configured",
+      ...(yield* stamp()),
+      provider: PI_DRIVER_KIND,
+      providerInstanceId: context.instanceId,
+      threadId: context.threadId,
+      payload: {
+        config: {
+          sessionId: context.sessionId ?? null,
+          sessionFile: context.sessionFile ?? null,
+          leafId: context.leafId,
+          lastEntryId: context.lastEntryId,
+          resumeCursor: cursor ?? null,
+          model: context.session.model ?? null,
+          thinkingLevel: context.currentThinkingLevel ?? null,
+          reason,
+        },
+      },
+    });
+  });
+
+  const attachUserEntriesToActiveTurn = (
+    context: PiSessionContext,
+    entries: ReadonlyArray<PiSessionEntry>,
+  ) => {
+    if (!context.activeTurnId) return;
+    const turn = context.turns.find((candidate) => candidate.id === context.activeTurnId);
+    if (!turn) return;
+    for (const entry of entries) {
+      if (userEntry(entry) && !turn.userEntryIds.includes(entry.id))
+        turn.userEntryIds.push(entry.id);
+    }
+  };
+
+  const rebuildRecoveredTurns = Effect.fn("PiAdapter.rebuildRecoveredTurns")(function* (
+    context: PiSessionContext,
+  ) {
+    const messages = yield* context.rpc.getForkMessages.pipe(
+      Effect.mapError((error) => adapterError(context.threadId, "get_fork_messages", error)),
+    );
+    context.turns = messages.map((message) => ({
+      id: TurnId.make(`pi-${message.entryId}`),
+      items: [{ role: "user", text: boundedPromptSummary(message.text), recovered: true }],
+      userEntryIds: [message.entryId],
+    }));
+  });
+
+  const reconcileNativeSession = Effect.fn("PiAdapter.reconcileNativeSession")(function* (
+    context: PiSessionContext,
+    reason: string,
+    options?: { readonly rebuildTurnsOnReplacement?: boolean },
+  ) {
+    const state = yield* context.rpc.getState.pipe(
+      Effect.mapError((error) => adapterError(context.threadId, "get_state", error)),
+    );
+    if (!isCurrentProcess(context)) {
+      return yield* new ProviderAdapterSessionClosedError({
+        provider: PI_DRIVER_KIND,
+        threadId: context.threadId,
+      });
+    }
+    if (!state.sessionFile) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PI_DRIVER_KIND,
+        method: "get_state",
+        detail: "Pi did not expose a persistent session file; recovery cannot continue safely.",
+      });
+    }
+    const replaced =
+      context.sessionId !== undefined &&
+      (context.sessionId !== state.sessionId ||
+        (context.sessionFile !== undefined &&
+          path.resolve(context.sessionFile) !== path.resolve(state.sessionFile)));
+    const entries = yield* context.rpc
+      .getEntries(replaced ? undefined : (context.lastEntryId ?? undefined))
+      .pipe(Effect.mapError((error) => adapterError(context.threadId, "get_entries", error)));
+    if (!isCurrentProcess(context)) {
+      return yield* new ProviderAdapterSessionClosedError({
+        provider: PI_DRIVER_KIND,
+        threadId: context.threadId,
+      });
+    }
+
+    if (replaced) {
+      yield* cancelPendingDialogs(context, true);
+      context.translation = makePiRuntimeTranslationState();
+      context.warnedUnknownEventTypes.clear();
+    }
+    attachUserEntriesToActiveTurn(context, entries.entries);
+    context.sessionFile = state.sessionFile;
+    context.sessionId = state.sessionId;
+    context.leafId = entries.leafId;
+    context.lastEntryId = entries.entries.at(-1)?.id ?? (replaced ? null : context.lastEntryId);
+    context.currentModel = state.model
+      ? { provider: state.model.provider, modelId: state.model.id }
+      : context.currentModel;
+    context.currentContextWindow = state.model?.contextWindow;
+    context.currentThinkingLevel = state.thinkingLevel;
+    context.session = {
+      ...context.session,
+      ...(context.currentModel ? { model: encodePiModelSlug(context.currentModel) } : {}),
+    };
+    if (replaced && options?.rebuildTurnsOnReplacement !== false) {
+      const activeSnapshot = context.activeTurnId
+        ? context.turns.find((turn) => turn.id === context.activeTurnId)
+        : undefined;
+      yield* rebuildRecoveredTurns(context);
+      if (activeSnapshot) context.turns.push(activeSnapshot);
+    }
+    yield* updateSessionCursor(context);
+    yield* emitSessionConfigured(context, reason);
+    return { state, entries, replaced } as const;
+  });
 
   const updateReadySession = Effect.fn("PiAdapter.updateReadySession")(function* (
     context: PiSessionContext,
@@ -421,7 +579,8 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
     context: PiSessionContext,
     metadata: PiRpcExit,
   ) {
-    if (context.stopped || context.exitEmitted || metadata.expected) return;
+    if (context.stopped || context.exitEmitted || metadata.expected || !isCurrentProcess(context))
+      return;
     context.exitEmitted = true;
     yield* cancelPendingDialogs(context, false);
     const detail = `Pi RPC process exited unexpectedly${metadata.exitCode === undefined ? "" : ` with code ${metadata.exitCode}`}.`;
@@ -541,7 +700,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
     context: PiSessionContext,
     event: PiRpcKnownEvent,
   ) {
-    if (context.stopped) return;
+    if (!isCurrentProcess(context)) return;
     switch (event.type) {
       case "agent_start":
         context.generationSawAgent = true;
@@ -550,7 +709,11 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         context.queuedContinuation = event.steering.length > 0 || event.followUp.length > 0;
         break;
       case "entry_appended":
+        // Pi currently emits this event for extension entries. Do not advance the
+        // append cursor here: a user entry may have been persisted immediately
+        // before it and must still be collected through get_entries.
         context.leafId = event.entry.id;
+        attachUserEntriesToActiveTurn(context, [event.entry]);
         break;
       case "thinking_level_changed":
         context.currentThinkingLevel = event.level;
@@ -609,11 +772,22 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         context.ignoredSettlements -= 1;
         return;
       }
-      if (translated.settlement) yield* settleTranslatedOutcome(context, translated.settlement);
+      const settlement = translated.settlement;
+      yield* Effect.gen(function* () {
+        yield* reconcileNativeSession(context, "agent_settled").pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to refresh the Pi resume cursor after settlement.", {
+              threadId: context.threadId,
+              cause,
+            }),
+          ),
+        );
+        if (settlement) yield* settleTranslatedOutcome(context, settlement);
+        if (translated.reconcileStats) yield* reconcileSessionStats(context, generation, turnId);
+      }).pipe(Effect.forkIn(context.scope));
+      return;
     }
-    if (translated.reconcileStats) {
-      yield* reconcileSessionStats(context, generation, turnId);
-    }
+    if (translated.reconcileStats) yield* reconcileSessionStats(context, generation, turnId);
   });
 
   const handleRpcEvent = Effect.fn("PiAdapter.handleRpcEvent")(function* (
@@ -907,14 +1081,22 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             issue: `Unknown Pi thinking level '${requestedThinking}'.`,
           });
         }
-        const cursor = parsePiResumeCursor(input.resumeCursor);
-        if (input.resumeCursor !== undefined && cursor === undefined) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PI_DRIVER_KIND,
-            operation: "startSession",
-            issue: "The Pi resume cursor is invalid or uses an unsupported version.",
-          });
-        }
+        const decodedCursor =
+          input.resumeCursor === undefined
+            ? undefined
+            : yield* Schema.decodeUnknownEffect(PiResumeCursor)(input.resumeCursor).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterValidationError({
+                      provider: PI_DRIVER_KIND,
+                      operation: "startSession",
+                      issue:
+                        "The persisted Pi resume cursor is invalid or uses an unsupported schema version; recovery cannot continue safely.",
+                      cause,
+                    }),
+                ),
+              );
+        const cursor = decodedCursor;
 
         const pendingDialogs = new Map<ApprovalRequestId, PiPendingDialog>();
         const permissionMarker = piPermissionGateRequired(input.runtimeMode)
@@ -1183,6 +1365,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         };
         const context: PiSessionContext = {
           threadId: input.threadId,
+          processGeneration: ++nextProcessGeneration,
           instanceId: options.instanceId,
           session: initialSession,
           scope: sessionScope,
@@ -1207,6 +1390,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           sessionFile: cursor?.sessionFile,
           sessionId: cursor?.sessionId,
           leafId: cursor?.leafId ?? null,
+          lastEntryId: cursor?.lastEntryId ?? null,
           extensionCommands: new Set(),
           translation: makePiRuntimeTranslationState(),
           warnedUnknownEventTypes: new Set(),
@@ -1230,6 +1414,26 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           const state = yield* rpc.getState.pipe(
             Effect.mapError((error) => adapterError(input.threadId, "get_state", error)),
           );
+          if (!state.sessionFile) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PI_DRIVER_KIND,
+              method: "get_state",
+              detail: cursor
+                ? `Pi did not load the persisted session '${cursor.sessionFile}'; recovery cannot continue.`
+                : "Pi did not create a persistent session file.",
+            });
+          }
+          if (
+            cursor &&
+            (state.sessionId !== cursor.sessionId ||
+              path.resolve(state.sessionFile) !== path.resolve(cursor.sessionFile))
+          ) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PI_DRIVER_KIND,
+              method: "get_state",
+              detail: `Pi loaded a different session than the persisted cursor. Expected '${cursor.sessionId}' at '${cursor.sessionFile}'.`,
+            });
+          }
           context.sessionFile = state.sessionFile;
           context.sessionId = state.sessionId;
           context.currentModel = state.model
@@ -1260,6 +1464,8 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             .getEntries()
             .pipe(Effect.mapError((error) => adapterError(input.threadId, "get_entries", error)));
           context.leafId = entries.leafId;
+          context.lastEntryId = entries.entries.at(-1)?.id ?? null;
+          if (cursor) yield* rebuildRecoveredTurns(context);
           context.session = {
             ...context.session,
             status: "ready",
@@ -1287,6 +1493,9 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                 sessionFile: state.sessionFile ?? null,
                 model: context.session.model ?? null,
                 thinkingLevel: context.currentThinkingLevel ?? state.thinkingLevel,
+                leafId: context.leafId,
+                lastEntryId: context.lastEntryId,
+                resumeCursor: resumeCursor(context) ?? null,
               },
             },
           });
@@ -1311,7 +1520,6 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
           Effect.mapError((error) => normalizeAdapterError(input.threadId, "startup", error)),
           Effect.catch((error) =>
             Effect.gen(function* () {
-              yield* Deferred.fail(ready, error);
               context.session = {
                 ...context.session,
                 status: "error",
@@ -1341,6 +1549,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
                   payload: { exitKind: "error", reason: error.message, recoverable: true },
                 });
               }
+              yield* Deferred.fail(ready, error);
               yield* scheduleSessionScopeClose(context);
             }),
           ),
@@ -1438,7 +1647,14 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
             updatedAt: yield* nowIso,
           };
           if (!continuing) {
-            context.turns = [...context.turns, { id: turnId, items: [{ role: "user", text }] }];
+            context.turns = [
+              ...context.turns,
+              {
+                id: turnId,
+                items: [{ role: "user", text: boundedPromptSummary(text) }],
+                userEntryIds: [],
+              },
+            ];
             yield* offer({
               type: "turn.started",
               ...(yield* stamp()),
@@ -1477,28 +1693,19 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         Effect.tapError((error) => settleActiveTurn(prepared.context, "failed", error.message)),
       );
 
-      const state = yield* prepared.context.rpc.getState.pipe(
-        Effect.mapError((error) => adapterError(input.threadId, "get_state", error)),
+      const reconciled = yield* reconcileNativeSession(
+        prepared.context,
+        prepared.extensionCommand ? "extension_command" : "prompt_accepted",
       );
       if (
         prepared.context.activeGeneration === prepared.generation &&
         !prepared.context.generationSawAgent &&
-        !state.isStreaming &&
-        state.pendingMessageCount === 0 &&
+        !reconciled.state.isStreaming &&
+        reconciled.state.pendingMessageCount === 0 &&
         !prepared.context.queuedContinuation
       ) {
         yield* settleActiveTurn(prepared.context, "completed");
       }
-      const entries = yield* prepared.context.rpc
-        .getEntries(prepared.context.leafId ?? undefined)
-        .pipe(Effect.mapError((error) => adapterError(input.threadId, "get_entries", error)));
-      prepared.context.leafId = entries.leafId;
-      prepared.context.sessionFile = state.sessionFile;
-      prepared.context.sessionId = state.sessionId;
-      prepared.context.session = {
-        ...prepared.context.session,
-        resumeCursor: resumeCursor(prepared.context),
-      };
       return {
         threadId: input.threadId,
         turnId: prepared.turnId,
@@ -1520,8 +1727,8 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
         context.ignoredSettlements += 1;
         yield* context.rpc.abort.pipe(Effect.ignore);
         yield* context.rpc.abortRetry.pipe(Effect.ignore);
-        // The state response is an ordering barrier for abort-side settlement events.
-        yield* context.rpc.getState.pipe(Effect.ignore);
+        // Reconciliation is also an ordering barrier for abort-side settlement events.
+        yield* reconcileNativeSession(context, "interrupt");
         context.ignoredSettlements = 0;
         yield* cancelPendingDialogs(context, true);
         yield* updateReadySession(context);
@@ -1634,27 +1841,83 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (options: PiAd
     );
 
   const readThread: PiAdapterShape["readThread"] = (threadId) =>
-    Effect.map(requireSession(threadId), (context) => ({
-      threadId,
-      turns: context.turns.map((turn) => ({ id: turn.id, items: [...turn.items] })),
-    }));
+    Effect.gen(function* () {
+      const context = yield* requireSession(threadId);
+      yield* Deferred.await(context.ready);
+      return snapshotThread(context);
+    }).pipe(Effect.mapError((error) => normalizeAdapterError(threadId, "readThread", error)));
 
   const rollbackThread: PiAdapterShape["rollbackThread"] = (threadId, numTurns) =>
-    Effect.gen(function* () {
-      yield* requireSession(threadId);
-      if (!Number.isInteger(numTurns) || numTurns < 1) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PI_DRIVER_KIND,
-          operation: "rollbackThread",
-          issue: "numTurns must be an integer >= 1.",
+    withThreadLock(
+      threadId,
+      Effect.gen(function* () {
+        const context = yield* requireSession(threadId);
+        yield* Deferred.await(context.ready);
+        if (!Number.isInteger(numTurns) || numTurns < 1) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PI_DRIVER_KIND,
+            operation: "rollbackThread",
+            issue: "numTurns must be an integer >= 1.",
+          });
+        }
+        if (context.activeTurnId !== undefined || context.session.status === "running") {
+          return yield* new ProviderAdapterRequestError({
+            provider: PI_DRIVER_KIND,
+            method: "rollbackThread",
+            detail: "Pi conversation rollback requires the active turn to be idle.",
+          });
+        }
+        if (numTurns > context.turns.length) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PI_DRIVER_KIND,
+            method: "rollbackThread",
+            detail: `Cannot roll back ${numTurns} Pi turns because only ${context.turns.length} are known.`,
+          });
+        }
+
+        const keepCount = context.turns.length - numTurns;
+        const removed = context.turns.slice(keepCount);
+        const earliest = removed[0];
+        const entryId = earliest?.userEntryIds[0];
+        if (!entryId) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PI_DRIVER_KIND,
+            method: "rollbackThread",
+            detail:
+              "The earliest removed T3 turn has no attributable Pi user entry, so native rollback would be ambiguous.",
+          });
+        }
+        const forkMessages = yield* context.rpc.getForkMessages.pipe(
+          Effect.mapError((error) => adapterError(threadId, "get_fork_messages", error)),
+        );
+        if (!forkMessages.some((message) => message.entryId === entryId)) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PI_DRIVER_KIND,
+            method: "rollbackThread",
+            detail: `Pi user entry '${entryId}' is not forkable on the active branch; rollback was not attempted.`,
+          });
+        }
+
+        const forked = yield* context.rpc
+          .fork(entryId)
+          .pipe(Effect.mapError((error) => adapterError(threadId, "fork", error)));
+        if (forked.cancelled) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PI_DRIVER_KIND,
+            method: "fork",
+            detail: "A Pi session_before_fork extension cancelled conversation rollback.",
+          });
+        }
+
+        const retained = context.turns.slice(0, keepCount);
+        yield* reconcileNativeSession(context, "rollback", {
+          rebuildTurnsOnReplacement: false,
         });
-      }
-      return yield* new ProviderAdapterRequestError({
-        provider: PI_DRIVER_KIND,
-        method: "rollbackThread",
-        detail: "Pi native rollback is implemented in phase 7.",
-      });
-    });
+        context.turns = retained;
+        yield* updateReadySession(context);
+        return snapshotThread(context);
+      }),
+    ).pipe(Effect.mapError((error) => normalizeAdapterError(threadId, "rollbackThread", error)));
 
   const stopSession: PiAdapterShape["stopSession"] = (threadId) =>
     withThreadLock(

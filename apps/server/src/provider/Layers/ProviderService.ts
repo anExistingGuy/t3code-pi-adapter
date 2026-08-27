@@ -336,6 +336,47 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     });
 
+  const refreshBindingAfterRuntimeEvent = Effect.fn(
+    "ProviderService.refreshBindingAfterRuntimeEvent",
+  )(function* (
+    source: { readonly instanceId: ProviderInstanceId; readonly provider: ProviderDriverKind },
+    event: ProviderRuntimeEvent,
+  ) {
+    if (event.type === "session.exited" && event.payload.exitKind === "error") {
+      const binding = Option.getOrUndefined(yield* directory.getBinding(event.threadId));
+      if (binding) {
+        yield* directory.upsert({
+          ...binding,
+          provider: source.provider,
+          providerInstanceId: source.instanceId,
+          status: "error",
+          runtimePayload: {
+            activeTurnId: null,
+            lastRuntimeEvent: event.type,
+            lastRuntimeEventAt: event.createdAt,
+          },
+        });
+      }
+      return;
+    }
+    if (
+      event.type !== "session.configured" &&
+      event.type !== "turn.completed" &&
+      event.type !== "turn.aborted"
+    ) {
+      return;
+    }
+    const adapter = yield* registry.getByInstance(source.instanceId);
+    const activeSessions = yield* adapter.listSessions();
+    const session = activeSessions.find((candidate) => candidate.threadId === event.threadId);
+    if (!session) return;
+    yield* upsertSessionBinding(
+      { ...session, providerInstanceId: source.instanceId },
+      event.threadId,
+      { lastRuntimeEvent: event.type, lastRuntimeEventAt: event.createdAt },
+    );
+  });
+
   const processRuntimeEvent = (
     source: {
       readonly instanceId: ProviderInstanceId;
@@ -344,6 +385,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
     Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
+      Effect.tap((canonicalEvent) =>
+        refreshBindingAfterRuntimeEvent(source, canonicalEvent).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to refresh provider resume state from a runtime event.", {
+              provider: source.provider,
+              providerInstanceId: source.instanceId,
+              threadId: canonicalEvent.threadId,
+              eventType: canonicalEvent.type,
+              cause,
+            }),
+          ),
+        ),
+      ),
       Effect.flatMap((canonicalEvent) =>
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
@@ -1121,6 +1175,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.rollback_turns": input.numTurns,
       });
       yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
+      const sessions = yield* routed.adapter.listSessions();
+      const refreshed = sessions.find((session) => session.threadId === routed.threadId);
+      if (refreshed) {
+        yield* upsertSessionBinding(
+          { ...refreshed, providerInstanceId: routed.instanceId },
+          routed.threadId,
+          {
+            lastRuntimeEvent: "provider.rollbackConversation",
+            lastRuntimeEventAt: yield* nowIso,
+          },
+        );
+      }
       yield* analytics.record("provider.conversation.rolled_back", {
         provider: routed.adapter.provider,
         turns: input.numTurns,

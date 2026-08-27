@@ -311,6 +311,8 @@ export const PiSessionEntry = Schema.Struct({
   id: Schema.String,
   parentId: Schema.NullOr(Schema.String),
   timestamp: Schema.String,
+  /** Present on message entries. Kept optional because extensions add other entry types. */
+  message: Schema.optional(PiAgentMessage),
 });
 export type PiSessionEntry = typeof PiSessionEntry.Type;
 

@@ -942,6 +942,85 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("persists refreshed resume state from lifecycle events and rollback", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-cursor-refresh");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-cursor-refresh",
+        runtimeMode: "full-access",
+      });
+
+      // Let the dynamically registered adapter subscription start before emitting.
+      yield* advanceTestClock(10);
+      const settledCursor = { opaque: "cursor-after-settlement" };
+      routing.codex.updateSession(threadId, (session) => ({
+        ...session,
+        resumeCursor: settledCursor,
+      }));
+      const observed = yield* Stream.runHead(
+        Stream.filter(provider.streamEvents, (event) => event.threadId === threadId),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      routing.codex.emit({
+        type: "session.configured",
+        eventId: asEventId("cursor-refresh-configured"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        payload: { config: { resumeCursor: settledCursor } },
+      });
+      yield* Fiber.join(observed);
+      const persistedAfterEvent = yield* repository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persistedAfterEvent), true);
+      if (Option.isSome(persistedAfterEvent)) {
+        assert.deepEqual(persistedAfterEvent.value.resumeCursor, settledCursor);
+      }
+
+      const rollbackCursor = { opaque: "cursor-after-rollback" };
+      routing.codex.rollbackThread.mockImplementationOnce((rollbackThreadId) =>
+        Effect.sync(() => {
+          routing.codex.updateSession(rollbackThreadId, (session) => ({
+            ...session,
+            resumeCursor: rollbackCursor,
+          }));
+          return { threadId: rollbackThreadId, turns: [] };
+        }),
+      );
+      yield* provider.rollbackConversation({ threadId, numTurns: 1 });
+      const persistedAfterRollback = yield* repository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persistedAfterRollback), true);
+      if (Option.isSome(persistedAfterRollback)) {
+        assert.deepEqual(persistedAfterRollback.value.resumeCursor, rollbackCursor);
+      }
+
+      const exited = yield* Stream.runHead(
+        Stream.filter(
+          provider.streamEvents,
+          (event) => event.eventId === "cursor-refresh-process-exited",
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      routing.codex.emit({
+        type: "session.exited",
+        eventId: asEventId("cursor-refresh-process-exited"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        payload: { exitKind: "error", recoverable: true, reason: "mock crash" },
+      });
+      yield* Fiber.join(exited);
+      const persistedAfterExit = yield* repository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persistedAfterExit), true);
+      if (Option.isSome(persistedAfterExit)) {
+        assert.equal(persistedAfterExit.value.status, "error");
+        assert.deepEqual(persistedAfterExit.value.resumeCursor, rollbackCursor);
+      }
+    }),
+  );
+
   it.effect("appends attachment file paths to the turn input text", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

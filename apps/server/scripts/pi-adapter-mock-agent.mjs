@@ -13,8 +13,16 @@ let streaming = false;
 let pendingCount = 0;
 let crashRequested = false;
 let delayedState;
+let delayedFork;
 let startupDialogEmitted = false;
 let leafCounter = 0;
+let forkCounter = 0;
+let entries = process.env.PI_ADAPTER_MOCK_ENTRIES
+  ? JSON.parse(process.env.PI_ADAPTER_MOCK_ENTRIES)
+  : [];
+leafCounter = entries.length;
+let sessionFile = "/mock/persistent-session.jsonl";
+let sessionId = "mock-persistent-session";
 let model = {
   id: "mock-model",
   name: "Mock Model",
@@ -32,11 +40,17 @@ const launchArgs = process.argv.slice(2);
 const providerIndex = launchArgs.indexOf("--provider");
 const modelIndex = launchArgs.indexOf("--model");
 const thinkingIndex = launchArgs.indexOf("--thinking");
+const sessionIndex = launchArgs.indexOf("--session");
 if (providerIndex >= 0 && launchArgs[providerIndex + 1])
   model.provider = launchArgs[providerIndex + 1];
 if (modelIndex >= 0 && launchArgs[modelIndex + 1]) model.id = launchArgs[modelIndex + 1];
 if (thinkingIndex >= 0 && launchArgs[thinkingIndex + 1])
   thinkingLevel = launchArgs[thinkingIndex + 1];
+if (sessionIndex >= 0 && launchArgs[sessionIndex + 1]) {
+  sessionFile = launchArgs[sessionIndex + 1];
+  const forkMatch = sessionFile.match(/\/fork-(\d+)\.jsonl$/);
+  if (forkMatch) sessionId = `mock-fork-${forkMatch[1]}`;
+}
 
 function log(value) {
   if (logPath) NodeFS.appendFileSync(logPath, `${JSON.stringify(value)}\n`);
@@ -61,8 +75,8 @@ function state() {
     isCompacting: false,
     steeringMode: "one-at-a-time",
     followUpMode: "one-at-a-time",
-    sessionFile: "/mock/persistent-session.jsonl",
-    sessionId: "mock-persistent-session",
+    sessionFile,
+    sessionId,
     autoCompactionEnabled: true,
     messageCount: leafCounter,
     pendingMessageCount: pendingCount,
@@ -104,6 +118,30 @@ function assistantMessage(stopReason = "stop") {
     stopReason,
     timestamp: Date.now(),
   };
+}
+function handleFork(command) {
+  const selectedIndex = entries.findIndex((entry) => entry.id === command.entryId);
+  const selected = entries[selectedIndex];
+  if (selectedIndex < 0 || selected?.message?.role !== "user") {
+    write({
+      id: command.id,
+      type: "response",
+      command: command.type,
+      success: false,
+      error: "Invalid entry ID for forking",
+    });
+    return;
+  }
+  if (process.env.PI_ADAPTER_MOCK_FORK_CANCEL === "1") {
+    response(command, { text: selected.message.content, cancelled: true });
+    return;
+  }
+  forkCounter += 1;
+  entries = entries.slice(0, selectedIndex);
+  leafCounter = entries.length;
+  sessionFile = `/mock/fork-${forkCounter}.jsonl`;
+  sessionId = `mock-fork-${forkCounter}`;
+  response(command, { text: selected.message.content, cancelled: false });
 }
 function emitCanonicalFixture() {
   const message = assistantMessage();
@@ -182,6 +220,11 @@ function handle(command) {
       delayedState = undefined;
       response(stateCommand, state());
     }
+    if (command.id === "fork-dialog" && delayedFork) {
+      const forkCommand = delayedFork;
+      delayedFork = undefined;
+      handleFork(forkCommand);
+    }
     return;
   }
   switch (command.type) {
@@ -218,6 +261,7 @@ function handle(command) {
       response(command, {
         commands: [
           { name: "instant", description: "Instant command", source: "extension" },
+          { name: "switch", description: "Replace session", source: "extension" },
           {
             name: "skill:test",
             description: "Test skill",
@@ -227,13 +271,51 @@ function handle(command) {
         ],
       });
       return;
-    case "get_entries":
-      response(command, { entries: [], leafId: leafCounter === 0 ? null : `leaf-${leafCounter}` });
+    case "get_entries": {
+      const sinceIndex = command.since
+        ? entries.findIndex((entry) => entry.id === command.since)
+        : -1;
+      if (command.since && sinceIndex < 0) {
+        write({
+          id: command.id,
+          type: "response",
+          command: command.type,
+          success: false,
+          error: `Unknown entry cursor: ${command.since}`,
+        });
+        return;
+      }
+      response(command, {
+        entries: command.since ? entries.slice(sinceIndex + 1) : entries,
+        leafId: entries.at(-1)?.id ?? null,
+      });
       if (crashRequested) {
         process.stderr.write("mock lifecycle crash");
         process.exitCode = 7;
         process.stdin.destroy();
       }
+      return;
+    }
+    case "get_fork_messages":
+      response(command, {
+        messages: entries
+          .filter((entry) => entry.type === "message" && entry.message?.role === "user")
+          .map((entry) => ({ entryId: entry.id, text: entry.message.content })),
+      });
+      return;
+    case "fork":
+      if (process.env.PI_ADAPTER_MOCK_FORK_DIALOG === "1") {
+        delayedFork = command;
+        write({
+          type: "extension_ui_request",
+          id: "fork-dialog",
+          method: "confirm",
+          title: "Fork session?",
+          message: "Allow native fork lifecycle",
+        });
+        return;
+      }
+      handleFork(command);
       return;
     case "get_session_stats":
       response(command, {
@@ -322,23 +404,30 @@ function handle(command) {
         });
       }
       if (command.message.startsWith("/instant")) return;
+      if (command.message.startsWith("/switch")) {
+        entries = [];
+        leafCounter = 0;
+        sessionFile = "/mock/extension-session.jsonl";
+        sessionId = "mock-extension-session";
+        return;
+      }
       if (command.message === "events") {
         emitCanonicalFixture();
         return;
       }
       streaming = true;
       leafCounter += 1;
+      const entry = {
+        type: "message",
+        id: `leaf-${leafCounter}`,
+        parentId: entries.at(-1)?.id ?? null,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { role: "user", content: command.message, timestamp: Date.now() },
+      };
+      entries.push(entry);
       write({ type: "agent_start" });
-      write({
-        type: "entry_appended",
-        entry: {
-          type: "message",
-          id: `leaf-${leafCounter}`,
-          parentId: leafCounter === 1 ? null : `leaf-${leafCounter - 1}`,
-          timestamp: "2026-01-01T00:00:00.000Z",
-        },
-      });
-      if (command.message === "complete") settle();
+      write({ type: "entry_appended", entry });
+      if (command.message.startsWith("complete")) settle();
       if (command.message === "crash") crashRequested = true;
       return;
     case "steer":

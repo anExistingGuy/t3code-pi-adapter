@@ -39,6 +39,9 @@ function makeTestAdapter(input?: {
   readonly dialogTimeout?: number;
   readonly dialogCrash?: boolean;
   readonly permissionTool?: string;
+  readonly forkCancel?: boolean;
+  readonly forkDialog?: boolean;
+  readonly entries?: ReadonlyArray<unknown>;
   readonly uiEvents?: boolean;
   readonly logPath?: string;
   readonly nativeRecords?: unknown[];
@@ -56,6 +59,9 @@ function makeTestAdapter(input?: {
         : { PI_ADAPTER_MOCK_DIALOG_TIMEOUT: String(input.dialogTimeout) }),
       ...(input?.dialogCrash ? { PI_ADAPTER_MOCK_DIALOG_CRASH: "1" } : {}),
       ...(input?.permissionTool ? { PI_ADAPTER_MOCK_PERMISSION_TOOL: input.permissionTool } : {}),
+      ...(input?.forkCancel ? { PI_ADAPTER_MOCK_FORK_CANCEL: "1" } : {}),
+      ...(input?.forkDialog ? { PI_ADAPTER_MOCK_FORK_DIALOG: "1" } : {}),
+      ...(input?.entries ? { PI_ADAPTER_MOCK_ENTRIES: JSON.stringify(input.entries) } : {}),
       ...(input?.uiEvents ? { PI_ADAPTER_MOCK_UI_EVENTS: "1" } : {}),
       ...(input?.logPath ? { PI_ADAPTER_MOCK_LOG: input.logPath } : {}),
     },
@@ -441,9 +447,15 @@ nodeIt("PiAdapter", (it) => {
         "turn.completed",
       ]);
 
-      const completion = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
-        Effect.forkChild({ startImmediately: true }),
-      );
+      const completion = yield* Stream.runCollect(
+        Stream.take(
+          Stream.filter(
+            adapter.streamEvents,
+            (event) => event.type === "turn.started" || event.type === "turn.aborted",
+          ),
+          2,
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
       const imageId = "pi-input-00000000-0000-4000-8000-000000000001";
       NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${imageId}.png`), "pixels");
       yield* adapter.sendTurn({
@@ -574,6 +586,9 @@ nodeIt("PiAdapter", (it) => {
       expect(types).toContain("follow_up");
       expect(types.filter((type) => type === "abort")).toHaveLength(1);
       expect((yield* adapter.listSessions())[0]?.status).toBe("ready");
+      const snapshot = yield* adapter.readThread(threadId);
+      expect(snapshot.turns).toHaveLength(1);
+      expect(snapshot.turns[0]?.items).toHaveLength(3);
 
       const nextCompletion = yield* Stream.runHead(
         Stream.filter(adapter.streamEvents, (event) => event.type === "turn.completed"),
@@ -619,6 +634,194 @@ nodeIt("PiAdapter", (it) => {
       expect((yield* adapter.listSessions())[0]?.model).toBe(
         encodePiModelSlug({ provider: "another/provider", modelId: "next model" }),
       );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("rejects unsupported cursors and never adopts a different resumed session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter();
+      const invalidThread = ThreadId.make("pi-invalid-cursor");
+      const invalid = yield* adapter
+        .startSession({
+          ...startInput(invalidThread),
+          resumeCursor: {
+            schemaVersion: 99,
+            sessionFile: "/mock/persistent-session.jsonl",
+            sessionId: "mock-persistent-session",
+          },
+        })
+        .pipe(Effect.flip);
+      expect(invalid._tag).toBe("ProviderAdapterValidationError");
+      expect(invalid.message).toContain("recovery cannot continue safely");
+
+      const mismatchThread = ThreadId.make("pi-mismatched-resume");
+      yield* adapter.startSession({
+        ...startInput(mismatchThread),
+        resumeCursor: {
+          schemaVersion: 1,
+          sessionFile: "/mock/persistent-session.jsonl",
+          sessionId: "different-session",
+          leafId: null,
+          lastEntryId: null,
+        },
+      });
+      const mismatch = yield* adapter
+        .sendTurn({ threadId: mismatchThread, input: "complete" })
+        .pipe(Effect.flip);
+      expect(mismatch.message).toContain("different session");
+      expect(yield* adapter.hasSession(mismatchThread)).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("recovers the exact active Pi branch and reconstructs minimal turn snapshots", () =>
+    Effect.gen(function* () {
+      const entries = [
+        {
+          type: "message",
+          id: "leaf-1",
+          parentId: null,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          message: { role: "user", content: "first", timestamp: 1 },
+        },
+        {
+          type: "message",
+          id: "leaf-2",
+          parentId: "leaf-1",
+          timestamp: "2026-01-01T00:00:01.000Z",
+          message: { role: "user", content: "second", timestamp: 2 },
+        },
+      ];
+      const adapter = yield* makeTestAdapter({ entries });
+      const threadId = ThreadId.make("pi-recovered-branch");
+      yield* adapter.startSession({
+        ...startInput(threadId),
+        resumeCursor: {
+          schemaVersion: 1,
+          sessionFile: "/mock/persistent-session.jsonl",
+          sessionId: "mock-persistent-session",
+          leafId: "leaf-2",
+          lastEntryId: "leaf-2",
+        },
+      });
+      const snapshot = yield* adapter.readThread(threadId);
+      expect(snapshot.turns).toHaveLength(2);
+      expect(snapshot.turns.map((turn) => turn.items[0])).toEqual([
+        { role: "user", text: "first", recovered: true },
+        { role: "user", text: "second", recovered: true },
+      ]);
+
+      const rolledBack = yield* adapter.rollbackThread(threadId, 1);
+      expect(rolledBack.turns).toHaveLength(1);
+      expect((yield* adapter.listSessions())[0]?.resumeCursor).toMatchObject({
+        sessionFile: "/mock/fork-1.jsonl",
+        sessionId: "mock-fork-1",
+        leafId: "leaf-1",
+      });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("tracks stable turn snapshots and forks before the earliest rolled-back turn", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const logPath = NodePath.join(config.stateDir, "pi-rollback.log");
+      const adapter = yield* makeTestAdapter({ logPath });
+      const threadId = ThreadId.make("pi-rollback");
+      yield* adapter.startSession(startInput(threadId));
+
+      for (const text of ["complete one", "complete two", "complete three"]) {
+        const completed = yield* Stream.runHead(
+          Stream.filter(
+            adapter.streamEvents,
+            (event) => event.threadId === threadId && event.type === "turn.completed",
+          ),
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* adapter.sendTurn({ threadId, input: text });
+        yield* Fiber.join(completed);
+      }
+
+      const before = yield* adapter.readThread(threadId);
+      expect(before.turns).toHaveLength(3);
+      const rolledBack = yield* adapter.rollbackThread(threadId, 2);
+      expect(rolledBack.turns.map((turn) => turn.id)).toEqual([before.turns[0]?.id]);
+      expect((yield* adapter.listSessions())[0]?.resumeCursor).toMatchObject({
+        schemaVersion: 1,
+        sessionFile: "/mock/fork-1.jsonl",
+        sessionId: "mock-fork-1",
+        leafId: "leaf-1",
+        lastEntryId: "leaf-1",
+      });
+      const fork = readLog(logPath)
+        .filter((entry) => entry.kind === "command")
+        .map((entry) => entry.command)
+        .find((command) => command?.type === "fork");
+      expect(fork).toMatchObject({ type: "fork", entryId: "leaf-2" });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("leaves snapshots and the cursor untouched when a Pi extension cancels fork", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter({ forkCancel: true });
+      const threadId = ThreadId.make("pi-rollback-cancelled");
+      yield* adapter.startSession(startInput(threadId));
+      const completed = yield* Stream.runHead(
+        Stream.filter(adapter.streamEvents, (event) => event.type === "turn.completed"),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* adapter.sendTurn({ threadId, input: "complete once" });
+      yield* Fiber.join(completed);
+      const beforeSnapshot = yield* adapter.readThread(threadId);
+      const beforeCursor = (yield* adapter.listSessions())[0]?.resumeCursor;
+
+      const failure = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
+      expect(failure.message).toContain("session_before_fork");
+      expect(yield* adapter.readThread(threadId)).toEqual(beforeSnapshot);
+      expect((yield* adapter.listSessions())[0]?.resumeCursor).toEqual(beforeCursor);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps extension lifecycle dialogs routable while native fork is pending", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter({ forkDialog: true });
+      const threadId = ThreadId.make("pi-rollback-dialog");
+      yield* adapter.startSession(startInput(threadId));
+      const completed = yield* Stream.runHead(
+        Stream.filter(adapter.streamEvents, (event) => event.type === "turn.completed"),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* adapter.sendTurn({ threadId, input: "complete once" });
+      yield* Fiber.join(completed);
+
+      const requested = yield* Stream.runHead(
+        Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "user-input.requested" &&
+            event.requestId === "fork-dialog",
+        ),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      const rollback = yield* adapter
+        .rollbackThread(threadId, 1)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      expect((yield* Fiber.join(requested))._tag).toBe("Some");
+      yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("fork-dialog"), {
+        "fork-dialog": "Yes",
+      });
+      expect((yield* Fiber.join(rollback)).turns).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("refreshes the durable cursor after an extension replaces the Pi session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter();
+      const threadId = ThreadId.make("pi-extension-switch");
+      yield* adapter.startSession(startInput(threadId));
+      yield* adapter.sendTurn({ threadId, input: "/switch" });
+      expect((yield* adapter.listSessions())[0]?.resumeCursor).toMatchObject({
+        sessionFile: "/mock/extension-session.jsonl",
+        sessionId: "mock-extension-session",
+        leafId: null,
+        lastEntryId: null,
+      });
+      expect((yield* adapter.readThread(threadId)).turns).toHaveLength(1);
     }).pipe(Effect.scoped),
   );
 
